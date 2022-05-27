@@ -1,9 +1,15 @@
 import os
+import platform
+
+if platform.system() == 'Darwin' and platform.machine() == 'arm64':
+    import pymysql
+    pymysql.version_info = (1, 4, 2, "final", 0)
+    pymysql.install_as_MySQLdb()
 
 from django.urls import reverse_lazy
 
 from .. import const
-from ..const import CONFIG, DYNAMIC
+from ..const import CONFIG
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 VERSION = const.VERSION
@@ -16,14 +22,14 @@ PROJECT_DIR = const.PROJECT_DIR
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = CONFIG.SECRET_KEY
 
-# SECURITY WARNING: keep the token secret, remove it if all coco, guacamole ok
+# SECURITY WARNING: keep the token secret, remove it if all koko, lion ok
 BOOTSTRAP_TOKEN = CONFIG.BOOTSTRAP_TOKEN
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = CONFIG.DEBUG
 
 # Absolute url for some case, for example email link
-SITE_URL = DYNAMIC.SITE_URL
+SITE_URL = CONFIG.SITE_URL
 
 # LOG LEVEL
 LOG_LEVEL = CONFIG.LOG_LEVEL
@@ -42,12 +48,16 @@ INSTALLED_APPS = [
     'perms.apps.PermsConfig',
     'ops.apps.OpsConfig',
     'settings.apps.SettingsConfig',
-    'common.apps.CommonConfig',
     'terminal.apps.TerminalConfig',
     'audits.apps.AuditsConfig',
     'authentication.apps.AuthenticationConfig',  # authentication
     'applications.apps.ApplicationsConfig',
     'tickets.apps.TicketsConfig',
+    'acls.apps.AclsConfig',
+    'notifications.apps.NotificationsConfig',
+    'rbac.apps.RBACConfig',
+    'common.apps.CommonConfig',
+    'jms_oidc_rp',
     'rest_framework',
     'rest_framework_swagger',
     'drf_yasg',
@@ -63,8 +73,9 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.forms',
+    'simple_history',  # 这个要放到最后，别特么瞎改顺序
 ]
-
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -75,14 +86,17 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'authentication.backends.openid.middleware.OpenIDAuthenticationMiddleware',
-    'django_cas_ng.middleware.CASMiddleware',
     'jumpserver.middleware.TimezoneMiddleware',
     'jumpserver.middleware.DemoMiddleware',
     'jumpserver.middleware.RequestMiddleware',
+    'jumpserver.middleware.RefererCheckMiddleware',
     'orgs.middleware.OrgMiddleware',
+    'authentication.backends.oidc.middleware.OIDCRefreshIDTokenMiddleware',
+    'authentication.backends.cas.middleware.CASMiddleware',
+    'authentication.middleware.MFAMiddleware',
+    'authentication.middleware.SessionCookieMiddleware',
+    'simple_history.middleware.HistoryRequestMiddleware',
 ]
-
 
 ROOT_URLCONF = 'jumpserver.urls'
 
@@ -114,15 +128,35 @@ LOGIN_REDIRECT_URL = reverse_lazy('index')
 LOGIN_URL = reverse_lazy('authentication:login')
 
 SESSION_COOKIE_DOMAIN = CONFIG.SESSION_COOKIE_DOMAIN
-CSRF_COOKIE_DOMAIN = CONFIG.CSRF_COOKIE_DOMAIN
+CSRF_COOKIE_DOMAIN = CONFIG.SESSION_COOKIE_DOMAIN
+
+# 设置 SESSION_COOKIE_NAME_PREFIX_KEY
+# 解决 不同域 session csrf cookie 获取混乱问题
+SESSION_COOKIE_NAME_PREFIX_KEY = 'SESSION_COOKIE_NAME_PREFIX'
+SESSION_COOKIE_NAME_PREFIX = CONFIG.SESSION_COOKIE_NAME_PREFIX
+if SESSION_COOKIE_NAME_PREFIX is not None:
+    pass
+elif SESSION_COOKIE_DOMAIN is not None:
+    SESSION_COOKIE_NAME_PREFIX = SESSION_COOKIE_DOMAIN.split('.')[0]
+else:
+    SESSION_COOKIE_NAME_PREFIX = 'jms_'
+CSRF_COOKIE_NAME = '{}csrftoken'.format(SESSION_COOKIE_NAME_PREFIX)
+SESSION_COOKIE_NAME = '{}sessionid'.format(SESSION_COOKIE_NAME_PREFIX)
+
 SESSION_COOKIE_AGE = CONFIG.SESSION_COOKIE_AGE
-SESSION_EXPIRE_AT_BROWSER_CLOSE = CONFIG.SESSION_EXPIRE_AT_BROWSER_CLOSE
-SESSION_ENGINE = 'redis_sessions.session'
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+# 自定义的配置，SESSION_EXPIRE_AT_BROWSER_CLOSE 始终为 True, 下面这个来控制是否强制关闭后过期 cookie
+SESSION_EXPIRE_AT_BROWSER_CLOSE_FORCE = CONFIG.SESSION_EXPIRE_AT_BROWSER_CLOSE_FORCE
+SESSION_SAVE_EVERY_REQUEST = CONFIG.SESSION_SAVE_EVERY_REQUEST
+SESSION_ENGINE = 'jumpserver.rewriting.session'
 SESSION_REDIS = {
-    'host': CONFIG.REDIS_HOST,
-    'port': CONFIG.REDIS_PORT,
-    'password': CONFIG.REDIS_PASSWORD,
-    'db': CONFIG.REDIS_DB_SESSION,
+    'url': '%(protocol)s://:%(password)s@%(host)s:%(port)s/%(db)s' % {
+        'protocol': 'rediss' if CONFIG.REDIS_USE_SSL else 'redis',
+        'password': CONFIG.REDIS_PASSWORD,
+        'host': CONFIG.REDIS_HOST,
+        'port': CONFIG.REDIS_PORT,
+        'db': CONFIG.REDIS_DB_CACHE,
+    },
     'prefix': 'auth_session',
     'socket_timeout': 1,
     'retry_on_timeout': False
@@ -145,12 +179,13 @@ DATABASES = {
         'OPTIONS': DB_OPTIONS
     }
 }
+
+
 DB_CA_PATH = os.path.join(PROJECT_DIR, 'data', 'certs', 'db_ca.pem')
 if CONFIG.DB_ENGINE.lower() == 'mysql':
     DB_OPTIONS['init_command'] = "SET sql_mode='STRICT_TRANS_TABLES'"
     if os.path.isfile(DB_CA_PATH):
         DB_OPTIONS['ssl'] = {'ca': DB_CA_PATH}
-
 
 # Password validation
 # https://docs.djangoproject.com/en/1.10/ref/settings/#auth-password-validators
@@ -173,9 +208,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/1.10/topics/i18n/
 # LANGUAGE_CODE = 'en'
-LANGUAGE_CODE = 'zh'
+LANGUAGE_CODE = CONFIG.LANGUAGE_CODE
 
-TIME_ZONE = 'Asia/Shanghai'
+TIME_ZONE = CONFIG.TIME_ZONE
 
 USE_I18N = True
 
@@ -212,15 +247,14 @@ MEDIA_ROOT = os.path.join(PROJECT_DIR, 'data', 'media').replace('\\', '/') + '/'
 FIXTURE_DIRS = [os.path.join(BASE_DIR, 'fixtures'), ]
 
 # Email config
-EMAIL_HOST = DYNAMIC.EMAIL_HOST
-EMAIL_PORT = DYNAMIC.EMAIL_PORT
-EMAIL_HOST_USER = DYNAMIC.EMAIL_HOST_USER
-EMAIL_HOST_PASSWORD = DYNAMIC.EMAIL_HOST_PASSWORD
-EMAIL_FROM = DYNAMIC.EMAIL_FROM
-EMAIL_RECIPIENT = DYNAMIC.EMAIL_RECIPIENT
-EMAIL_USE_SSL = DYNAMIC.EMAIL_USE_SSL
-EMAIL_USE_TLS = DYNAMIC.EMAIL_USE_TLS
-
+EMAIL_HOST = CONFIG.EMAIL_HOST
+EMAIL_PORT = CONFIG.EMAIL_PORT
+EMAIL_HOST_USER = CONFIG.EMAIL_HOST_USER
+EMAIL_HOST_PASSWORD = CONFIG.EMAIL_HOST_PASSWORD
+EMAIL_FROM = CONFIG.EMAIL_FROM
+EMAIL_RECIPIENT = CONFIG.EMAIL_RECIPIENT
+EMAIL_USE_SSL = CONFIG.EMAIL_USE_SSL
+EMAIL_USE_TLS = CONFIG.EMAIL_USE_TLS
 
 # Custom User Auth model
 AUTH_USER_MODEL = 'users.User'
@@ -230,19 +264,46 @@ FILE_UPLOAD_PERMISSIONS = 0o644
 FILE_UPLOAD_DIRECTORY_PERMISSIONS = 0o755
 
 # Cache use redis
+REDIS_SSL_KEYFILE = os.path.join(PROJECT_DIR, 'data', 'certs', 'redis_client.key')
+if not os.path.exists(REDIS_SSL_KEYFILE):
+    REDIS_SSL_KEYFILE = None
+
+REDIS_SSL_CERTFILE = os.path.join(PROJECT_DIR, 'data', 'certs', 'redis_client.crt')
+if not os.path.exists(REDIS_SSL_CERTFILE):
+    REDIS_SSL_CERTFILE = None
+
+REDIS_SSL_CA_CERTS = os.path.join(PROJECT_DIR, 'data', 'certs', 'redis_ca.crt')
+if not os.path.exists(REDIS_SSL_CA_CERTS):
+    REDIS_SSL_CA_CERTS = os.path.join(PROJECT_DIR, 'data', 'certs', 'redis_ca.pem')
+
+if not os.path.exists(REDIS_SSL_CA_CERTS):
+    REDIS_SSL_CA_CERTS = None
+
+REDIS_SSL_REQUIRED = CONFIG.REDIS_SSL_REQUIRED or 'none'
+
 CACHES = {
     'default': {
         # 'BACKEND': 'redis_cache.RedisCache',
         'BACKEND': 'redis_lock.django_cache.RedisCache',
-        'LOCATION': 'redis://:%(password)s@%(host)s:%(port)s/%(db)s' % {
+        'LOCATION': '%(protocol)s://:%(password)s@%(host)s:%(port)s/%(db)s' % {
+            'protocol': 'rediss' if CONFIG.REDIS_USE_SSL else 'redis',
             'password': CONFIG.REDIS_PASSWORD,
             'host': CONFIG.REDIS_HOST,
             'port': CONFIG.REDIS_PORT,
             'db': CONFIG.REDIS_DB_CACHE,
+        },
+        'OPTIONS': {
+            "REDIS_CLIENT_KWARGS": {"health_check_interval": 30},
+            "CONNECTION_POOL_KWARGS": {
+                'ssl_cert_reqs': REDIS_SSL_REQUIRED,
+                "ssl_keyfile": REDIS_SSL_KEYFILE,
+                "ssl_certfile": REDIS_SSL_CERTFILE,
+                "ssl_ca_certs": REDIS_SSL_CA_CERTS
+            } if CONFIG.REDIS_USE_SSL else {}
         }
     }
 }
 
-
 FORCE_SCRIPT_NAME = CONFIG.FORCE_SCRIPT_NAME
-
+SESSION_COOKIE_SECURE = CONFIG.SESSION_COOKIE_SECURE
+CSRF_COOKIE_SECURE = CONFIG.CSRF_COOKIE_SECURE

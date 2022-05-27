@@ -4,7 +4,7 @@ import re
 from collections import defaultdict
 
 from celery import shared_task
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext_noop
 from django.utils import timezone
 
 from orgs.utils import tmp_to_org, org_aware_func
@@ -60,9 +60,12 @@ def parse_windows_result_to_users(result):
         task_result.pop()
 
     for line in task_result:
-        user = space.split(line)
-        if user[0]:
-            users[user[0]] = {}
+        username_list = space.split(line)
+        #  such as: ['Admini', 'appadm', 'DefaultAccount', '']
+        for username in username_list:
+            if not username:
+                continue
+            users[username] = {}
     return users
 
 
@@ -92,7 +95,7 @@ def add_asset_users(assets, results):
             for username, data in users.items():
                 defaults = {'asset': asset, 'username': username, 'present': True}
                 if data.get("ip"):
-                    defaults["ip_last_login"] = data["ip"]
+                    defaults["ip_last_login"] = data["ip"][:32]
                 if data.get("date"):
                     defaults["date_last_login"] = data["date"]
                 GatheredUser.objects.update_or_create(
@@ -105,7 +108,7 @@ def add_asset_users(assets, results):
 def gather_asset_users(assets, task_name=None):
     from ops.utils import update_or_create_ansible_task
     if task_name is None:
-        task_name = _("Gather assets users")
+        task_name = gettext_noop("Gather assets users")
     assets = clean_ansible_task_hosts(assets)
     if not assets:
         return
@@ -141,7 +144,8 @@ def gather_asset_users(assets, task_name=None):
 
 @shared_task(queue="ansible")
 def gather_nodes_asset_users(nodes_key):
-    assets = Node.get_nodes_all_assets(nodes_key)
+    nodes = Node.objects.filter(key__in=nodes_key)
+    assets = Node.get_nodes_all_assets(*nodes)
     assets_groups_by_100 = [assets[i:i+100] for i in range(0, len(assets), 100)]
     for _assets in assets_groups_by_100:
         gather_asset_users(_assets)

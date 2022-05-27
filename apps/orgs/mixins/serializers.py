@@ -5,18 +5,17 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 
 from common.validators import ProjectUniqueValidator
-from common.mixins import BulkSerializerMixin
+from common.mixins import BulkSerializerMixin, CommonSerializerMixin
 from ..utils import get_current_org_id_for_serializer
 
 
 __all__ = [
     "OrgResourceSerializerMixin", "BulkOrgResourceSerializerMixin",
-    "BulkOrgResourceModelSerializer", "OrgMembershipSerializerMixin",
-    "OrgResourceModelSerializerMixin",
+    "BulkOrgResourceModelSerializer", "OrgResourceModelSerializerMixin",
 ]
 
 
-class OrgResourceSerializerMixin(serializers.Serializer):
+class OrgResourceSerializerMixin(CommonSerializerMixin, serializers.Serializer):
     """
     通过API批量操作资源时, 自动给每个资源添加所需属性org_id的值为current_org_id
     (同时为serializer.is_valid()对Model的unique_together校验做准备)
@@ -53,9 +52,3 @@ class BulkOrgResourceSerializerMixin(BulkSerializerMixin, OrgResourceSerializerM
 
 class BulkOrgResourceModelSerializer(BulkOrgResourceSerializerMixin, serializers.ModelSerializer):
     pass
-
-
-class OrgMembershipSerializerMixin:
-    def run_validation(self, initial_data=None):
-        initial_data['organization'] = str(self.context['org'].id)
-        return super().run_validation(initial_data)

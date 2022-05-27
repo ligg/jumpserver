@@ -1,218 +1,228 @@
 import uuid
-from django.conf import settings
 
 from django.db import models
 from django.utils.translation import ugettext_lazy as _
 
-from common.utils import is_uuid, lazyproperty
+from common.utils import lazyproperty, settings
+from common.tree import TreeNode
 
 
-class Organization(models.Model):
+class OrgRoleMixin:
+    members: models.Manager
+
+    def get_members(self):
+        return self.members.all().distinct()
+
+    def add_member(self, user, role=None):
+        from rbac.builtin import BuiltinRole
+        from .utils import tmp_to_org
+        role_id = BuiltinRole.org_user.id
+        if role:
+            role_id = role.id
+        with tmp_to_org(self):
+            defaults = {
+                'user': user, 'role_id': role_id,
+                'org_id': self.id, 'scope': 'org'
+            }
+            self.members.through.objects.update_or_create(**defaults, defaults=defaults)
+
+    def get_origin_role_members(self, role_name):
+        from rbac.models import OrgRoleBinding
+        from users.models import User
+        from rbac.builtin import BuiltinRole
+        from .utils import tmp_to_org
+
+        role_mapper = {
+            'user': BuiltinRole.org_user,
+            'auditor': BuiltinRole.org_auditor,
+            'admin': BuiltinRole.org_admin
+        }
+        assert role_name in role_mapper
+        role = role_mapper.get(role_name).get_role()
+        with tmp_to_org(self):
+            org_admins = OrgRoleBinding.get_role_users(role)
+            return org_admins
+
+    @property
+    def admins(self):
+        from users.models import User
+        admins = self.get_origin_role_members('admin')
+        if not admins:
+            admins = User.objects.filter(username='admin')
+        return admins
+
+    @property
+    def auditors(self):
+        return self.get_origin_role_members('auditor')
+
+    @property
+    def users(self):
+        return self.get_origin_role_members('user')
+
+
+class Organization(OrgRoleMixin, models.Model):
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
     name = models.CharField(max_length=128, unique=True, verbose_name=_("Name"))
-    users = models.ManyToManyField('users.User', related_name='related_user_orgs', blank=True)
-    admins = models.ManyToManyField('users.User', related_name='related_admin_orgs', blank=True)
-    auditors = models.ManyToManyField('users.User', related_name='related_audit_orgs', blank=True)
     created_by = models.CharField(max_length=32, null=True, blank=True, verbose_name=_('Created by'))
     date_created = models.DateTimeField(auto_now_add=True, null=True, blank=True, verbose_name=_('Date created'))
-    comment = models.TextField(max_length=128, default='', blank=True, verbose_name=_('Comment'))
+    comment = models.TextField(default='', blank=True, verbose_name=_('Comment'))
+    members = models.ManyToManyField(
+        'users.User', related_name='orgs', through='rbac.RoleBinding', through_fields=('org', 'user')
+    )
 
-    orgs = None
-    CACHE_PREFIX = 'JMS_ORG_{}'
     ROOT_ID = '00000000-0000-0000-0000-000000000000'
-    ROOT_NAME = 'ROOT'
-    DEFAULT_ID = 'DEFAULT'
-    DEFAULT_NAME = 'DEFAULT'
-    SYSTEM_ID = '00000000-0000-0000-0000-000000000002'
-    SYSTEM_NAME = 'SYSTEM'
-    _user_admin_orgs = None
+    ROOT_NAME = _('GLOBAL')
+    DEFAULT_ID = '00000000-0000-0000-0000-000000000002'
+    DEFAULT_NAME = 'Default'
+    orgs_mapping = None
 
     class Meta:
         verbose_name = _("Organization")
+        permissions = (
+            ('view_rootorg', _('Can view root org')),
+        )
 
     def __str__(self):
-        return self.name
-
-    def set_to_cache(self):
-        if self.__class__.orgs is None:
-            self.__class__.orgs = {}
-        self.__class__.orgs[str(self.id)] = self
-
-    def expire_cache(self):
-        self.__class__.orgs.pop(str(self.id), None)
+        return str(self.name)
 
     @classmethod
-    def get_instance_from_cache(cls, oid):
-        if not cls.orgs or not isinstance(cls.orgs, dict):
-            return None
-        return cls.orgs.get(str(oid))
-
-    @classmethod
-    def get_instance(cls, id_or_name, default=False):
-        cached = cls.get_instance_from_cache(id_or_name)
-        if cached:
-            return cached
-
-        if id_or_name is None:
-            return cls.default() if default else None
-        elif id_or_name in [cls.DEFAULT_ID, cls.DEFAULT_NAME, '']:
-            return cls.default()
-        elif id_or_name in [cls.ROOT_ID, cls.ROOT_NAME]:
-            return cls.root()
-        elif id_or_name in [cls.SYSTEM_ID, cls.SYSTEM_NAME]:
-            return cls.system()
-
-        try:
-            if is_uuid(id_or_name):
-                org = cls.objects.get(id=id_or_name)
-            else:
-                org = cls.objects.get(name=id_or_name)
-            org.set_to_cache()
-        except cls.DoesNotExist:
-            org = cls.default() if default else None
+    def get_instance(cls, id_or_name, default=None):
+        assert default is None or isinstance(default, cls), (
+            '`default` must be None or `Organization` instance'
+        )
+        org = cls.get_instance_from_memory(id_or_name)
+        org = org or default
         return org
 
-    # @lazyproperty
-    # lazyproperty 导致用户列表中角色显示出现不稳定的情况, 如果不加会导致数据库操作次数太多
-    def org_users(self):
-        from users.models import User
-        if self.is_real():
-            return self.users.all()
-        users = User.objects.filter(role=User.ROLE_USER)
-        if self.is_default() and not settings.DEFAULT_ORG_SHOW_ALL_USERS:
-            users = users.filter(related_user_orgs__isnull=True)
-        return users
+    @classmethod
+    def get_instance_from_memory(cls, id_or_name):
+        if not isinstance(cls.orgs_mapping, dict):
+            cls.orgs_mapping = cls.construct_orgs_mapping()
 
-    def get_org_users(self):
-        return self.org_users()
+        org = cls.orgs_mapping.get(str(id_or_name))
+        if not org:
+            # 内存失效速度慢于读取速度(on_org_create_or_update)
+            cls.orgs_mapping = cls.construct_orgs_mapping()
 
-    # @lazyproperty
-    def org_admins(self):
-        from users.models import User
-        if self.is_real():
-            return self.admins.all()
-        return User.objects.filter(role=User.ROLE_ADMIN)
+        org = cls.orgs_mapping.get(str(id_or_name))
+        return org
 
-    def get_org_admins(self):
-        return self.org_admins()
+    @classmethod
+    def construct_orgs_mapping(cls):
+        orgs_mapping = {}
+        for org in cls.objects.all():
+            orgs_mapping[str(org.id)] = org
+            orgs_mapping[str(org.name)] = org
+        root_org = cls.root()
+        orgs_mapping.update({
+            root_org.id: root_org,
+            'GLOBAL': root_org,
+            '全局组织': root_org
+        })
+        return orgs_mapping
+
+    @classmethod
+    def expire_orgs_mapping(cls):
+        cls.orgs_mapping = None
 
     def org_id(self):
-        if self.is_real():
-            return self.id
-        elif self.is_root():
-            return self.ROOT_ID
-        else:
-            return ''
-
-    # @lazyproperty
-    def org_auditors(self):
-        from users.models import User
-        if self.is_real():
-            return self.auditors.all()
-        return User.objects.filter(role=User.ROLE_AUDITOR)
-
-    def get_org_auditors(self):
-        return self.org_auditors()
-
-    def get_org_members(self, exclude=()):
-        from users.models import User
-        members = User.objects.none()
-        if 'Admin' not in exclude:
-            members |= self.get_org_admins()
-        if 'User' not in exclude:
-            members |= self.get_org_users()
-        if 'Auditor' not in exclude:
-            members |= self.get_org_auditors()
-        return members.exclude(role=User.ROLE_APP).distinct()
-
-    def can_admin_by(self, user):
-        if user.is_superuser:
-            return True
-        if self.get_org_admins().filter(id=user.id):
-            return True
-        return False
-
-    def can_audit_by(self, user):
-        if user.is_super_auditor:
-            return True
-        if self.get_org_auditors().filter(id=user.id):
-            return True
-        return False
-
-    def can_user_by(self, user):
-        if self.get_org_users().filter(id=user.id):
-            return True
-        return False
-
-    def is_real(self):
-        return self.id not in (self.DEFAULT_NAME, self.ROOT_ID, self.SYSTEM_ID)
-
-    @classmethod
-    def get_user_admin_orgs(cls, user):
-        admin_orgs = []
-        if user.is_anonymous:
-            return admin_orgs
-        elif user.is_superuser:
-            admin_orgs = list(cls.objects.all())
-            admin_orgs.append(cls.default())
-        elif user.is_org_admin:
-            admin_orgs = user.related_admin_orgs.all()
-        return admin_orgs
-
-    @classmethod
-    def get_user_user_orgs(cls, user):
-        user_orgs = []
-        if user.is_anonymous:
-            return user_orgs
-        user_orgs = user.related_user_orgs.all()
-        return user_orgs
-
-    @classmethod
-    def get_user_audit_orgs(cls, user):
-        audit_orgs = []
-        if user.is_anonymous:
-            return audit_orgs
-        elif user.is_super_auditor:
-            audit_orgs = list(cls.objects.all())
-            audit_orgs.append(cls.default())
-        elif user.is_org_auditor:
-            audit_orgs = user.related_audit_orgs.all()
-        return audit_orgs
-
-    @classmethod
-    def get_user_admin_or_audit_orgs(self, user):
-        admin_orgs = self.get_user_admin_orgs(user)
-        audit_orgs = self.get_user_audit_orgs(user)
-        orgs = set(admin_orgs) | set(audit_orgs)
-        return orgs
+        return self.id
 
     @classmethod
     def default(cls):
-        return cls(id=cls.DEFAULT_ID, name=cls.DEFAULT_NAME)
+        defaults = dict(id=cls.DEFAULT_ID, name=cls.DEFAULT_NAME)
+        obj, created = cls.objects.get_or_create(defaults=defaults, id=cls.DEFAULT_ID)
+        return obj
 
     @classmethod
     def root(cls):
-        return cls(id=cls.ROOT_ID, name=cls.ROOT_NAME)
-
-    @classmethod
-    def system(cls):
-        return cls(id=cls.SYSTEM_ID, name=cls.SYSTEM_NAME)
+        name = settings.GLOBAL_ORG_DISPLAY_NAME or cls.ROOT_NAME
+        return cls(id=cls.ROOT_ID, name=name)
 
     def is_root(self):
-        return self.id is self.ROOT_ID
+        return self.id == self.ROOT_ID
 
     def is_default(self):
-        return self.id is self.DEFAULT_ID
-
-    def is_system(self):
-        return self.id is self.SYSTEM_ID
+        return str(self.id) == self.DEFAULT_ID
 
     def change_to(self):
         from .utils import set_current_org
         set_current_org(self)
 
-    @classmethod
-    def all_orgs(cls):
-        orgs = list(cls.objects.all())
-        orgs.append(cls.default())
-        return orgs
+    @lazyproperty
+    def resource_statistics_cache(self):
+        from .caches import OrgResourceStatisticsCache
+        return OrgResourceStatisticsCache(self)
+
+    def get_total_resources_amount(self):
+        from django.apps import apps
+        from orgs.mixins.models import OrgModelMixin
+        summary = {'users.Members': self.get_members().count()}
+        for app_name, app_config in apps.app_configs.items():
+            models_cls = app_config.get_models()
+            for model in models_cls:
+                if not issubclass(model, OrgModelMixin):
+                    continue
+                key = '{}.{}'.format(app_name, model.__name__)
+                summary[key] = self.get_resource_amount(model)
+        return summary
+
+    def get_resource_amount(self, resource_model):
+        from .utils import tmp_to_org
+        from .mixins.models import OrgModelMixin
+
+        if not issubclass(resource_model, OrgModelMixin):
+            return 0
+        with tmp_to_org(self):
+            return resource_model.objects.all().count()
+
+    def as_tree_node(self, oid, pid, opened=True):
+        node = TreeNode(**{
+            'id': oid,
+            'name': self.name,
+            'title': self.name,
+            'pId': pid,
+            'open': opened,
+            'isParent': True,
+            'meta': {
+                'type': 'org'
+            }
+        })
+        return node
+
+    def delete_related_models(self):
+        from orgs.utils import tmp_to_root_org
+        from tickets.models import TicketFlow
+        with tmp_to_root_org():
+            TicketFlow.objects.filter(org_id=self.id).delete()
+
+    def delete(self, *args, **kwargs):
+        self.delete_related_models()
+        return super().delete(*args, **kwargs)
+
+
+class OrganizationMember(models.Model):
+    """
+    注意：直接调用该 `Model.delete` `Model.objects.delete` 不会触发清理该用户的信号
+    """
+
+    id = models.UUIDField(default=uuid.uuid4, primary_key=True)
+    org = models.ForeignKey(
+        Organization, related_name='m2m_org_members', on_delete=models.CASCADE, verbose_name=_('Organization')
+    )
+    user = models.ForeignKey(
+        'users.User', related_name='m2m_org_members', on_delete=models.CASCADE, verbose_name=_('User')
+    )
+    role = models.CharField(max_length=16, default='User', verbose_name=_("Role"))
+    date_created = models.DateTimeField(auto_now_add=True, verbose_name=_("Date created"))
+    date_updated = models.DateTimeField(auto_now=True, verbose_name=_("Date updated"))
+    created_by = models.CharField(max_length=128, null=True, verbose_name=_('Created by'))
+
+    # objects = OrgMemberManager()
+
+    class Meta:
+        unique_together = [('org', 'user', 'role')]
+        db_table = 'orgs_organization_members'
+
+    def __str__(self):
+        return '{} | {}'.format(self.user, self.org)

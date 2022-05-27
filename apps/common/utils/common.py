@@ -10,7 +10,10 @@ from functools import wraps
 import time
 import ipaddress
 import psutil
+import platform
+import os
 
+from django.conf import settings
 
 UUID_PATTERN = re.compile(r'\w{8}(-\w{4}){3}-\w{12}')
 ipip_db = None
@@ -28,6 +31,8 @@ def combine_seq(s1, s2, callback=None):
 
 
 def get_logger(name=''):
+    if '/' in name:
+        name = os.path.basename(name).replace('.py', '')
     return logging.getLogger('jumpserver.%s' % name)
 
 
@@ -41,7 +46,7 @@ def timesince(dt, since='', default="just now"):
     3 days, 5 hours.
     """
 
-    if since is '':
+    if not since:
         since = datetime.datetime.utcnow()
 
     if since is None:
@@ -140,7 +145,7 @@ def is_uuid(seq):
     elif isinstance(seq, str) and UUID_PATTERN.match(seq):
         return True
     elif isinstance(seq, (list, tuple)):
-        all([is_uuid(x) for x in seq])
+        return all([is_uuid(x) for x in seq])
     return False
 
 
@@ -160,6 +165,11 @@ def get_request_ip_or_data(request):
         ip = request.data.get('remote_addr', '')
     ip = ip or get_request_ip(request)
     return ip
+
+
+def get_request_user_agent(request):
+    user_agent = request.META.get('HTTP_USER_AGENT', '')
+    return user_agent
 
 
 def validate_ip(ip):
@@ -186,23 +196,17 @@ def with_cache(func):
     return wrapper
 
 
-def random_string(length):
-    import string
-    import random
-    charset = string.ascii_letters + string.digits
-    s = [random.choice(charset) for i in range(length)]
-    return ''.join(s)
-
-
 logger = get_logger(__name__)
 
 
 def timeit(func):
     def wrapper(*args, **kwargs):
-        if hasattr(func, '__name__'):
-            name = func.__name__
-        else:
-            name = func
+        name = func
+        for attr in ('__qualname__', '__name__'):
+            if hasattr(func, attr):
+                name = getattr(func, attr)
+                break
+
         logger.debug("Start call: {}".format(name))
         now = time.time()
         result = func(*args, **kwargs)
@@ -241,8 +245,119 @@ class lazyproperty:
             return value
 
 
-def get_disk_usage():
-    partitions = psutil.disk_partitions()
-    mount_points = [p.mountpoint for p in partitions]
-    usages = {p: psutil.disk_usage(p) for p in mount_points}
-    return usages
+def get_disk_usage(path):
+    return psutil.disk_usage(path=path).percent
+
+
+def get_cpu_load():
+    cpu_load_1, cpu_load_5, cpu_load_15 = psutil.getloadavg()
+    cpu_count = psutil.cpu_count()
+    single_cpu_load_1 = cpu_load_1 / cpu_count
+    single_cpu_load_1 = '%.2f' % single_cpu_load_1
+    return float(single_cpu_load_1)
+
+
+def get_docker_mem_usage_if_limit():
+    try:
+        with open('/sys/fs/cgroup/memory/memory.limit_in_bytes') as f:
+            limit_in_bytes = int(f.readline())
+            total = psutil.virtual_memory().total
+            if limit_in_bytes >= total:
+                raise ValueError('Not limit')
+
+        with open('/sys/fs/cgroup/memory/memory.usage_in_bytes') as f:
+            usage_in_bytes = int(f.readline())
+
+        with open('/sys/fs/cgroup/memory/memory.stat') as f:
+            inactive_file = 0
+            for line in f:
+                if line.startswith('total_inactive_file'):
+                    name, inactive_file = line.split()
+                    break
+
+                if line.startswith('inactive_file'):
+                    name, inactive_file = line.split()
+                    continue
+
+            inactive_file = int(inactive_file)
+        return ((usage_in_bytes - inactive_file) / limit_in_bytes) * 100
+
+    except Exception as e:
+        return None
+
+
+def get_memory_usage():
+    usage = get_docker_mem_usage_if_limit()
+    if usage is not None:
+        return usage
+    return psutil.virtual_memory().percent
+
+
+class Time:
+    def __init__(self):
+        self._timestamps = []
+        self._msgs = []
+
+    def begin(self):
+        self._timestamps.append(time.time())
+
+    def time(self, msg):
+        self._timestamps.append(time.time())
+        self._msgs.append(msg)
+
+    def print(self):
+        last, *timestamps = self._timestamps
+        for timestamp, msg in zip(timestamps, self._msgs):
+            logger.debug(f'TIME_IT: {msg} {timestamp-last}')
+            last = timestamp
+
+
+def bulk_get(d, keys, default=None):
+    values = []
+    for key in keys:
+        values.append(d.get(key, default))
+    return values
+
+
+def unique(objects, key=None):
+    seen = OrderedDict()
+
+    if key is None:
+        key = lambda item: item
+
+    for obj in objects:
+        v = key(obj)
+        if v not in seen:
+            seen[v] = obj
+    return list(seen.values())
+
+
+def get_file_by_arch(dir, filename):
+    platform_name = platform.system()
+    arch = platform.machine()
+
+    file_path = os.path.join(
+        settings.BASE_DIR, dir, platform_name, arch, filename
+    )
+    return file_path
+
+
+def pretty_string(data: str, max_length=128, ellipsis_str='...'):
+    """
+    params:
+       data: abcdefgh
+       max_length: 7
+       ellipsis_str: ...
+   return:
+       ab...gh
+    """
+    if len(data) < max_length:
+        return data
+    remain_length = max_length - len(ellipsis_str)
+    half = remain_length // 2
+    if half <= 1:
+        return data[:max_length]
+    start = data[:half]
+    end = data[-half:]
+    data = f'{start}{ellipsis_str}{end}'
+    return data

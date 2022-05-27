@@ -1,69 +1,95 @@
 # -*- coding: utf-8 -*-
 #
 
-from rest_framework import status
-from rest_framework.views import Response
+from django.utils.translation import ugettext as _
+from django.conf import settings
 from rest_framework_bulk import BulkModelViewSet
+from rest_framework.generics import RetrieveAPIView
+from rest_framework.exceptions import PermissionDenied
 
-from common.permissions import IsSuperUserOrAppUser
+from common.permissions import IsValidUser
 from .models import Organization
-from .serializers import OrgSerializer, OrgReadSerializer, \
-    OrgMembershipUserSerializer, OrgMembershipAdminSerializer
+from .serializers import (
+    OrgSerializer, CurrentOrgSerializer
+)
 from users.models import User, UserGroup
-from assets.models import Asset, Domain, AdminUser, SystemUser, Label
-from perms.models import AssetPermission
-from orgs.utils import current_org
+from assets.models import (
+    Asset, Domain, SystemUser, Label, Node, Gateway,
+    CommandFilter, CommandFilterRule, GatheredUser
+)
+from applications.models import Application
+from perms.models import AssetPermission, ApplicationPermission
+from orgs.utils import current_org, tmp_to_root_org
 from common.utils import get_logger
-from .mixins.api import OrgMembershipModelViewSetMixin
+
 
 logger = get_logger(__file__)
 
 
+# 部分 org 相关的 model，需要清空这些数据之后才能删除该组织
+org_related_models = [
+    User, UserGroup, Asset, Label, Domain, Gateway, Node, SystemUser, Label,
+    CommandFilter, CommandFilterRule, GatheredUser,
+    AssetPermission, ApplicationPermission,
+    Application,
+]
+
+
 class OrgViewSet(BulkModelViewSet):
+    filterset_fields = ('name',)
+    search_fields = ('name', 'comment')
     queryset = Organization.objects.all()
     serializer_class = OrgSerializer
-    permission_classes = (IsSuperUserOrAppUser,)
-    org = None
+    ordering_fields = ('name',)
+    ordering = ('name', )
 
     def get_serializer_class(self):
-        if self.action in ('list', 'retrieve'):
-            return OrgReadSerializer
-        else:
-            return super().get_serializer_class()
+        mapper = {
+            'list': OrgSerializer,
+            'retrieve': OrgSerializer
+        }
+        return mapper.get(self.action, super().get_serializer_class())
 
-    def get_data_from_model(self, model):
+    @tmp_to_root_org()
+    def get_data_from_model(self, org, model):
         if model == User:
-            data = model.objects.filter(related_user_orgs__id=self.org.id)
+            data = model.get_org_users(org=org)
+        elif model == Node:
+            # 根节点不能手动删除，所以排除检查
+            data = model.objects.filter(org_id=org.id).exclude(parent_key='', key__regex=r'^[0-9]+$')
         else:
-            data = model.objects.filter(org_id=self.org.id)
+            data = model.objects.filter(org_id=org.id)
         return data
 
-    def destroy(self, request, *args, **kwargs):
-        self.org = self.get_object()
-        models = [
-            User, UserGroup,
-            Asset, Domain, AdminUser, SystemUser, Label,
-            AssetPermission,
-        ]
-        for model in models:
-            data = self.get_data_from_model(model)
-            if data:
-                return Response(status=status.HTTP_400_BAD_REQUEST)
-        else:
-            if str(current_org) == str(self.org):
-                return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
-            self.org.delete()
-            return Response({'msg': True}, status=status.HTTP_200_OK)
+    def allow_bulk_destroy(self, qs, filtered):
+        return False
+
+    def perform_destroy(self, instance):
+        if str(current_org) == str(instance):
+            msg = _('The current organization ({}) cannot be deleted').format(current_org)
+            raise PermissionDenied(detail=msg)
+
+        if str(instance.id) == settings.AUTH_LDAP_SYNC_ORG_ID:
+            msg = _(
+                'LDAP synchronization is set to the current organization. Please switch to another organization before deleting'
+            )
+            raise PermissionDenied(detail=msg)
+
+        for model in org_related_models:
+            data = self.get_data_from_model(instance, model)
+            if not data:
+                continue
+            msg = _(
+                'The organization have resource ({}) cannot be deleted'
+            ).format(model._meta.verbose_name)
+            raise PermissionDenied(detail=msg)
+
+        super().perform_destroy(instance)
 
 
-class OrgMembershipAdminsViewSet(OrgMembershipModelViewSetMixin, BulkModelViewSet):
-    serializer_class = OrgMembershipAdminSerializer
-    membership_class = Organization.admins.through
-    permission_classes = (IsSuperUserOrAppUser, )
+class CurrentOrgDetailApi(RetrieveAPIView):
+    serializer_class = CurrentOrgSerializer
+    permission_classes = (IsValidUser,)
 
-
-class OrgMembershipUsersViewSet(OrgMembershipModelViewSetMixin, BulkModelViewSet):
-    serializer_class = OrgMembershipUserSerializer
-    membership_class = Organization.users.through
-    permission_classes = (IsSuperUserOrAppUser, )
-
+    def get_object(self):
+        return current_org

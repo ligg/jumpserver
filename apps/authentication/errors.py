@@ -3,28 +3,38 @@
 from django.utils.translation import ugettext_lazy as _
 from django.urls import reverse
 from django.conf import settings
+from rest_framework import status
 
+from common.exceptions import JMSException
 from .signals import post_auth_failed
-from users.utils import (
-    increase_login_failed_count, get_login_failed_count
-)
+from users.utils import LoginBlockUtil, MFABlockUtils, LoginIpBlockUtil
 
 reason_password_failed = 'password_failed'
+reason_password_decrypt_failed = 'password_decrypt_failed'
 reason_mfa_failed = 'mfa_failed'
 reason_mfa_unset = 'mfa_unset'
 reason_user_not_exist = 'user_not_exist'
 reason_password_expired = 'password_expired'
 reason_user_invalid = 'user_invalid'
 reason_user_inactive = 'user_inactive'
+reason_user_expired = 'user_expired'
+reason_backend_not_match = 'backend_not_match'
+reason_acl_not_allow = 'acl_not_allow'
+only_local_users_are_allowed = 'only_local_users_are_allowed'
 
 reason_choices = {
     reason_password_failed: _('Username/password check failed'),
+    reason_password_decrypt_failed: _('Password decrypt failed'),
     reason_mfa_failed: _('MFA failed'),
     reason_mfa_unset: _('MFA unset'),
     reason_user_not_exist: _("Username does not exist"),
     reason_password_expired: _("Password expired"),
     reason_user_invalid: _('Disabled or expired'),
-    reason_user_inactive: _("This account is inactive.")
+    reason_user_inactive: _("This account is inactive."),
+    reason_user_expired: _("This account is expired"),
+    reason_backend_not_match: _("Auth backend not match"),
+    reason_acl_not_allow: _("ACL is not allowed"),
+    only_local_users_are_allowed: _("Only local users are allowed")
 }
 old_reason_choices = {
     '0': '-',
@@ -41,12 +51,23 @@ invalid_login_msg = _(
     "You can also try {times_try} times "
     "(The account will be temporarily locked for {block_time} minutes)"
 )
-block_login_msg = _(
+block_user_login_msg = _(
     "The account has been locked "
     "(please contact admin to unlock it or try again after {} minutes)"
 )
-mfa_failed_msg = _("MFA code invalid, or ntp sync server time")
-
+block_ip_login_msg = _(
+    "The ip has been locked "
+    "(please contact admin to unlock it or try again after {} minutes)"
+)
+block_mfa_msg = _(
+    "The account has been locked "
+    "(please contact admin to unlock it or try again after {} minutes)"
+)
+mfa_error_msg = _(
+    "{error}, "
+    "You can also try {times_try} times "
+    "(The account will be temporarily locked for {block_time} minutes)"
+)
 mfa_required_msg = _("MFA required")
 mfa_unset_msg = _("MFA not set, please set it first")
 login_confirm_required_msg = _("Login confirm required")
@@ -73,7 +94,7 @@ class AuthFailedNeedBlockMixin:
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        increase_login_failed_count(self.username, self.ip)
+        LoginBlockUtil(self.username, self.ip).incr_failed_count()
 
 
 class AuthFailedError(Exception):
@@ -93,17 +114,34 @@ class AuthFailedError(Exception):
             'msg': self.msg,
         }
 
+    def __str__(self):
+        return str(self.msg)
 
-class CredentialError(AuthFailedNeedLogMixin, AuthFailedNeedBlockMixin, AuthFailedError):
+
+class BlockGlobalIpLoginError(AuthFailedError):
+    error = 'block_global_ip_login'
+
+    def __init__(self, username, ip, **kwargs):
+        self.msg = block_ip_login_msg.format(settings.SECURITY_LOGIN_IP_LIMIT_TIME)
+        LoginIpBlockUtil(ip).set_block_if_need()
+        super().__init__(username=username, ip=ip, **kwargs)
+
+
+class CredentialError(
+    AuthFailedNeedLogMixin, AuthFailedNeedBlockMixin, BlockGlobalIpLoginError, AuthFailedError
+):
     def __init__(self, error, username, ip, request):
         super().__init__(error=error, username=username, ip=ip, request=request)
-        times_up = settings.SECURITY_LOGIN_LIMIT_COUNT
-        times_failed = get_login_failed_count(username, ip)
-        times_try = int(times_up) - int(times_failed)
+        util = LoginBlockUtil(username, ip)
+        times_remainder = util.get_remainder_times()
         block_time = settings.SECURITY_LOGIN_LIMIT_TIME
 
+        if times_remainder < 1:
+            self.msg = block_user_login_msg.format(settings.SECURITY_LOGIN_LIMIT_TIME)
+            return
+
         default_msg = invalid_login_msg.format(
-            times_try=times_try, block_time=block_time
+            times_try=times_remainder, block_time=block_time
         )
         if error == reason_password_failed:
             self.msg = default_msg
@@ -113,19 +151,36 @@ class CredentialError(AuthFailedNeedLogMixin, AuthFailedNeedBlockMixin, AuthFail
 
 class MFAFailedError(AuthFailedNeedLogMixin, AuthFailedError):
     error = reason_mfa_failed
-    msg = mfa_failed_msg
+    msg: str
 
-    def __init__(self, username, request):
+    def __init__(self, username, request, ip, mfa_type, error):
         super().__init__(username=username, request=request)
 
+        util = MFABlockUtils(username, ip)
+        times_remainder = util.incr_failed_count()
+        block_time = settings.SECURITY_LOGIN_LIMIT_TIME
 
-class MFAUnsetError(AuthFailedNeedLogMixin, AuthFailedError):
+        if times_remainder:
+            self.msg = mfa_error_msg.format(
+                error=error, times_try=times_remainder, block_time=block_time
+            )
+        else:
+            self.msg = block_mfa_msg.format(settings.SECURITY_LOGIN_LIMIT_TIME)
+
+
+class BlockMFAError(AuthFailedNeedLogMixin, AuthFailedError):
+    error = 'block_mfa'
+
+    def __init__(self, username, request, ip):
+        self.msg = block_mfa_msg.format(settings.SECURITY_LOGIN_LIMIT_TIME)
+        super().__init__(username=username, request=request, ip=ip)
+
+
+class MFAUnsetError(Exception):
     error = reason_mfa_unset
     msg = mfa_unset_msg
 
     def __init__(self, user, request, url):
-        super().__init__(username=user.username, request=request)
-        self.user = user
         self.url = url
 
 
@@ -133,7 +188,7 @@ class BlockLoginError(AuthFailedNeedBlockMixin, AuthFailedError):
     error = 'block_login'
 
     def __init__(self, username, ip):
-        self.msg = block_login_msg.format(settings.SECURITY_LOGIN_LIMIT_TIME)
+        self.msg = block_user_login_msg.format(settings.SECURITY_LOGIN_LIMIT_TIME)
         super().__init__(username=username, ip=ip)
 
 
@@ -163,15 +218,48 @@ class MFARequiredError(NeedMoreInfoError):
     msg = mfa_required_msg
     error = 'mfa_required'
 
+    def __init__(self, error='', msg='', mfa_types=()):
+        super().__init__(error=error, msg=msg)
+        self.choices = mfa_types
+
     def as_data(self):
         return {
             'error': self.error,
             'msg': self.msg,
             'data': {
-                'choices': ['otp'],
+                'choices': self.choices,
                 'url': reverse('api-auth:mfa-challenge')
             }
         }
+
+
+class ACLError(AuthFailedNeedLogMixin, AuthFailedError):
+    msg = reason_acl_not_allow
+    error = 'acl_error'
+
+    def __init__(self, msg, **kwargs):
+        self.msg = msg
+        super().__init__(**kwargs)
+
+    def as_data(self):
+        return {
+            "error": reason_acl_not_allow,
+            "msg": self.msg
+        }
+
+
+class LoginIPNotAllowed(ACLError):
+    def __init__(self, username, request, **kwargs):
+        self.username = username
+        self.request = request
+        super().__init__(_("IP is not allowed"), **kwargs)
+
+
+class TimePeriodNotAllowed(ACLError):
+    def __init__(self, username, request, **kwargs):
+        self.username = username
+        self.request = request
+        super().__init__(_("Time Period is not allowed"), **kwargs)
 
 
 class LoginConfirmBaseError(NeedMoreInfoError):
@@ -200,3 +288,80 @@ class LoginConfirmOtherError(LoginConfirmBaseError):
     def __init__(self, ticket_id, status):
         msg = login_confirm_error_msg.format(status)
         super().__init__(ticket_id=ticket_id, msg=msg)
+
+
+class SSOAuthClosed(JMSException):
+    default_code = 'sso_auth_closed'
+    default_detail = _('SSO auth closed')
+
+
+class PasswordTooSimple(JMSException):
+    default_code = 'passwd_too_simple'
+    default_detail = _('Your password is too simple, please change it for security')
+
+    def __init__(self, url, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.url = url
+
+
+class PasswordNeedUpdate(JMSException):
+    default_code = 'passwd_need_update'
+    default_detail = _('You should to change your password before login')
+
+    def __init__(self, url, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.url = url
+
+
+class PasswordRequireResetError(JMSException):
+    default_code = 'passwd_has_expired'
+    default_detail = _('Your password has expired, please reset before logging in')
+
+    def __init__(self, url, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.url = url
+
+
+class WeComCodeInvalid(JMSException):
+    default_code = 'wecom_code_invalid'
+    default_detail = 'Code invalid, can not get user info'
+
+
+class WeComBindAlready(JMSException):
+    default_code = 'wecom_bind_already'
+    default_detail = 'WeCom already binded'
+
+
+class WeComNotBound(JMSException):
+    default_code = 'wecom_not_bound'
+    default_detail = 'WeCom is not bound'
+
+
+class DingTalkNotBound(JMSException):
+    default_code = 'dingtalk_not_bound'
+    default_detail = 'DingTalk is not bound'
+
+
+class FeiShuNotBound(JMSException):
+    default_code = 'feishu_not_bound'
+    default_detail = 'FeiShu is not bound'
+
+
+class PasswordInvalid(JMSException):
+    default_code = 'passwd_invalid'
+    default_detail = _('Your password is invalid')
+
+
+class MFACodeRequiredError(AuthFailedError):
+    error = 'mfa_code_required'
+    msg = _("Please enter MFA code")
+
+
+class SMSCodeRequiredError(AuthFailedError):
+    error = 'sms_code_required'
+    msg = _("Please enter SMS code")
+
+
+class UserPhoneNotSet(AuthFailedError):
+    error = 'phone_not_set'
+    msg = _('Phone not set')

@@ -12,7 +12,8 @@ from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
 
 from common.utils import get_logger, lazyproperty
-from common.fields.model import (
+from common.utils.translate import translate_value
+from common.db.fields import (
     JsonListTextField, JsonDictCharField, EncryptJsonDictCharField,
     JsonDictTextField,
 )
@@ -37,7 +38,8 @@ class Task(PeriodTaskModelMixin, OrgModelMixin):
     comment = models.TextField(blank=True, verbose_name=_("Comment"))
     date_created = models.DateTimeField(auto_now_add=True, db_index=True, verbose_name=_("Date created"))
     date_updated = models.DateTimeField(auto_now=True, verbose_name=_("Date updated"))
-    latest_adhoc = models.ForeignKey('ops.AdHoc', on_delete=models.SET_NULL, null=True, related_name='task_latest')
+    latest_adhoc = models.ForeignKey('ops.AdHoc', on_delete=models.SET_NULL,
+                                     null=True, related_name='task_latest')
     latest_execution = models.ForeignKey('ops.AdHocExecution', on_delete=models.SET_NULL, null=True, related_name='task_latest')
     total_run_amount = models.IntegerField(default=0)
     success_run_amount = models.IntegerField(default=0)
@@ -57,6 +59,11 @@ class Task(PeriodTaskModelMixin, OrgModelMixin):
             return self.latest_execution.is_success
         else:
             return False
+
+    @lazyproperty
+    def display_name(self):
+        value = translate_value(self.name)
+        return value
 
     @property
     def timedelta(self):
@@ -125,7 +132,11 @@ class Task(PeriodTaskModelMixin, OrgModelMixin):
         db_table = 'ops_task'
         unique_together = ('name', 'org_id')
         ordering = ('-date_updated',)
+        verbose_name = _("Task")
         get_latest_by = 'date_created'
+        permissions = [
+            ('view_taskmonitor', _('Can view task monitor'))
+        ]
 
 
 class AdHoc(OrgModelMixin):
@@ -146,9 +157,14 @@ class AdHoc(OrgModelMixin):
     hosts = models.ManyToManyField('assets.Asset', verbose_name=_("Host"))
     run_as_admin = models.BooleanField(default=False, verbose_name=_('Run as admin'))
     run_as = models.CharField(max_length=64, default='', blank=True, null=True, verbose_name=_('Username'))
+    run_system_user = models.ForeignKey('assets.SystemUser', null=True, on_delete=models.CASCADE)
     become = EncryptJsonDictCharField(max_length=1024, default='', blank=True, null=True, verbose_name=_("Become"))
     created_by = models.CharField(max_length=64, default='', blank=True, null=True, verbose_name=_('Create by'))
     date_created = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    @lazyproperty
+    def run_times(self):
+        return self.execution.count()
 
     @property
     def inventory(self):
@@ -163,7 +179,7 @@ class AdHoc(OrgModelMixin):
 
         inventory = JMSInventory(
             self.hosts.all(), run_as_admin=self.run_as_admin,
-            run_as=self.run_as, become_info=become_info
+            run_as=self.run_as, become_info=become_info, system_user=self.run_system_user
         )
         return inventory
 
@@ -175,12 +191,14 @@ class AdHoc(OrgModelMixin):
 
     def run(self):
         try:
-            hid = current_task.request.id
+            celery_task_id = current_task.request.id
         except AttributeError:
-            hid = str(uuid.uuid4())
+            celery_task_id = None
+
         execution = AdHocExecution(
-            id=hid, adhoc=self, task=self.task,
-            task_display=str(self.task),
+            celery_task_id=celery_task_id,
+            adhoc=self, task=self.task,
+            task_display=str(self.task)[:128],
             date_start=timezone.now(),
             hosts_amount=self.hosts.count(),
         )
@@ -222,6 +240,7 @@ class AdHoc(OrgModelMixin):
     class Meta:
         db_table = "ops_adhoc"
         get_latest_by = 'date_created'
+        verbose_name = _('AdHoc')
 
 
 class AdHocExecution(OrgModelMixin):
@@ -231,6 +250,7 @@ class AdHocExecution(OrgModelMixin):
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
     task = models.ForeignKey(Task, related_name='execution', on_delete=models.SET_NULL, null=True)
     task_display = models.CharField(max_length=128, blank=True, default='', verbose_name=_("Task display"))
+    celery_task_id = models.UUIDField(default=None, null=True)
     hosts_amount = models.IntegerField(default=0, verbose_name=_("Host amount"))
     adhoc = models.ForeignKey(AdHoc, related_name='execution', on_delete=models.SET_NULL, null=True)
     date_start = models.DateTimeField(auto_now_add=True, verbose_name=_('Start time'))
@@ -264,6 +284,7 @@ class AdHocExecution(OrgModelMixin):
                 self.adhoc.tasks,
                 self.adhoc.pattern,
                 self.task.name,
+                execution_id=self.id
             )
             return result.results_raw, result.results_summary
         except AnsibleError as e:
@@ -278,18 +299,12 @@ class AdHocExecution(OrgModelMixin):
         raw = ''
 
         try:
-            date_start_s = timezone.now().now().strftime('%Y-%m-%d %H:%M:%S')
-            print(_("{} Start task: {}").format(date_start_s, self.task.name))
             raw, summary = self.start_runner()
         except Exception as e:
             logger.error(e, exc_info=True)
             raw = {"dark": {"all": str(e)}, "contacted": []}
         finally:
             self.clean_up(summary, time_start)
-            date_end = timezone.now().now()
-            date_end_s = date_end.strftime('%Y-%m-%d %H:%M:%S')
-            print(_("{} Task finish").format(date_end_s))
-            print('.\n\n.')
             return raw, summary
 
     def clean_up(self, summary, time_start):
@@ -321,3 +336,4 @@ class AdHocExecution(OrgModelMixin):
     class Meta:
         db_table = "ops_adhoc_execution"
         get_latest_by = 'date_start'
+        verbose_name = _("AdHoc execution")

@@ -1,63 +1,85 @@
 #  coding: utf-8
 #
-
+from django.db import models
 from django.utils.translation import ugettext_lazy as _
 
 
-# RemoteApp
+class AppCategory(models.TextChoices):
+    db = 'db', _('Database')
+    remote_app = 'remote_app', _('Remote app')
+    cloud = 'cloud', 'Cloud'
 
-REMOTE_APP_BOOT_PROGRAM_NAME = '||jmservisor'
+    @classmethod
+    def get_label(cls, category):
+        return dict(cls.choices).get(category, '')
 
-REMOTE_APP_TYPE_CHROME = 'chrome'
-REMOTE_APP_TYPE_MYSQL_WORKBENCH = 'mysql_workbench'
-REMOTE_APP_TYPE_VMWARE_CLIENT = 'vmware_client'
-REMOTE_APP_TYPE_CUSTOM = 'custom'
-
-# Fields attribute write_only default => False
-
-REMOTE_APP_TYPE_CHROME_FIELDS = [
-    {'name': 'chrome_target'},
-    {'name': 'chrome_username'},
-    {'name': 'chrome_password', 'write_only': True}
-]
-REMOTE_APP_TYPE_MYSQL_WORKBENCH_FIELDS = [
-    {'name': 'mysql_workbench_ip'},
-    {'name': 'mysql_workbench_name'},
-    {'name': 'mysql_workbench_username'},
-    {'name': 'mysql_workbench_password', 'write_only': True}
-]
-REMOTE_APP_TYPE_VMWARE_CLIENT_FIELDS = [
-    {'name': 'vmware_target'},
-    {'name': 'vmware_username'},
-    {'name': 'vmware_password', 'write_only': True}
-]
-REMOTE_APP_TYPE_CUSTOM_FIELDS = [
-    {'name': 'custom_cmdline'},
-    {'name': 'custom_target'},
-    {'name': 'custom_username'},
-    {'name': 'custom_password', 'write_only': True}
-]
-
-REMOTE_APP_TYPE_FIELDS_MAP = {
-    REMOTE_APP_TYPE_CHROME: REMOTE_APP_TYPE_CHROME_FIELDS,
-    REMOTE_APP_TYPE_MYSQL_WORKBENCH: REMOTE_APP_TYPE_MYSQL_WORKBENCH_FIELDS,
-    REMOTE_APP_TYPE_VMWARE_CLIENT: REMOTE_APP_TYPE_VMWARE_CLIENT_FIELDS,
-    REMOTE_APP_TYPE_CUSTOM: REMOTE_APP_TYPE_CUSTOM_FIELDS
-}
-
-REMOTE_APP_TYPE_CHOICES = (
-    (REMOTE_APP_TYPE_CHROME, 'Chrome'),
-    (REMOTE_APP_TYPE_MYSQL_WORKBENCH, 'MySQL Workbench'),
-    (REMOTE_APP_TYPE_VMWARE_CLIENT, 'vSphere Client'),
-    (REMOTE_APP_TYPE_CUSTOM, _('Custom')),
-)
+    @classmethod
+    def is_xpack(cls, category):
+        return category in ['remote_app']
 
 
-# DatabaseApp
+class AppType(models.TextChoices):
+    # db category
+    mysql = 'mysql', 'MySQL'
+    mariadb = 'mariadb', 'MariaDB'
+    oracle = 'oracle', 'Oracle'
+    pgsql = 'postgresql', 'PostgreSQL'
+    sqlserver = 'sqlserver', 'SQLServer'
+    redis = 'redis', 'Redis'
+    mongodb = 'mongodb', 'MongoDB'
 
+    # remote-app category
+    chrome = 'chrome', 'Chrome'
+    mysql_workbench = 'mysql_workbench', 'MySQL Workbench'
+    vmware_client = 'vmware_client', 'vSphere Client'
+    custom = 'custom', _('Custom')
 
-DATABASE_APP_TYPE_MYSQL = 'mysql'
+    # cloud category
+    k8s = 'k8s', 'Kubernetes'
 
-DATABASE_APP_TYPE_CHOICES = (
-    (DATABASE_APP_TYPE_MYSQL, 'MySQL'),
-)
+    @classmethod
+    def category_types_mapper(cls):
+        return {
+            AppCategory.db: [
+                cls.mysql, cls.mariadb, cls.oracle, cls.pgsql,
+                cls.sqlserver, cls.redis, cls.mongodb
+            ],
+            AppCategory.remote_app: [
+                cls.chrome, cls.mysql_workbench,
+                cls.vmware_client, cls.custom
+            ],
+            AppCategory.cloud: [cls.k8s]
+        }
+
+    @classmethod
+    def type_category_mapper(cls):
+        mapper = {}
+        for category, tps in cls.category_types_mapper().items():
+            for tp in tps:
+                mapper[tp] = category
+        return mapper
+
+    @classmethod
+    def get_label(cls, tp):
+        return dict(cls.choices).get(tp, '')
+
+    @classmethod
+    def db_types(cls):
+        return [tp.value for tp in cls.category_types_mapper()[AppCategory.db]]
+
+    @classmethod
+    def remote_app_types(cls):
+        return [tp.value for tp in cls.category_types_mapper()[AppCategory.remote_app]]
+
+    @classmethod
+    def cloud_types(cls):
+        return [tp.value for tp in cls.category_types_mapper()[AppCategory.cloud]]
+
+    @classmethod
+    def is_xpack(cls, tp):
+        tp_category_mapper = cls.type_category_mapper()
+        category = tp_category_mapper[tp]
+
+        if AppCategory.is_xpack(category):
+            return True
+        return tp in ['oracle', 'postgresql', 'sqlserver']

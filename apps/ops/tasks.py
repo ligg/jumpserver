@@ -5,19 +5,23 @@ import time
 
 from django.conf import settings
 from celery import shared_task, subtask
+
 from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import ugettext_lazy as _, gettext
 
-from common.utils import get_logger, get_object_or_none, get_disk_usage
+from common.utils import get_logger, get_object_or_none, get_log_keep_day
 from orgs.utils import tmp_to_root_org, tmp_to_org
 from .celery.decorator import (
     register_as_period_task, after_app_shutdown_clean_periodic,
     after_app_ready_start
 )
-from .celery.utils import create_or_update_celery_periodic_tasks
+from .celery.utils import (
+    create_or_update_celery_periodic_tasks, get_celery_periodic_task,
+    disable_celery_periodic_task, delete_celery_periodic_task
+)
 from .models import Task, CommandExecution, CeleryTask
-from .utils import send_server_performance_mail
+from .notifications import ServerPerformanceCheckUtil
 
 logger = get_logger(__file__)
 
@@ -80,10 +84,10 @@ def clean_tasks_adhoc_period():
 @after_app_shutdown_clean_periodic
 @register_as_period_task(interval=3600*24, description=_("Clean celery log period"))
 def clean_celery_tasks_period():
-    expire_days = settings.TASK_LOG_KEEP_DAYS
     logger.debug("Start clean celery task history")
-    one_month_ago = timezone.now() - timezone.timedelta(days=expire_days)
-    tasks = CeleryTask.objects.filter(date_start__lt=one_month_ago)
+    expire_days = get_log_keep_day('TASK_LOG_KEEP_DAYS')
+    days_ago = timezone.now() - timezone.timedelta(days=expire_days)
+    tasks = CeleryTask.objects.filter(date_start__lt=days_ago)
     tasks.delete()
     tasks = CeleryTask.objects.filter(date_start__isnull=True)
     tasks.delete()
@@ -97,6 +101,29 @@ def clean_celery_tasks_period():
 
 @shared_task
 @after_app_ready_start
+def clean_celery_periodic_tasks():
+    """清除celery定时任务"""
+    need_cleaned_tasks = [
+        'handle_be_interrupted_change_auth_task_periodic',
+    ]
+    logger.info('Start clean celery periodic tasks: {}'.format(need_cleaned_tasks))
+    for task_name in need_cleaned_tasks:
+        logger.info('Start clean task: {}'.format(task_name))
+        task = get_celery_periodic_task(task_name)
+        if task is None:
+            logger.info('Task does not exist: {}'.format(task_name))
+            continue
+        disable_celery_periodic_task(task_name)
+        delete_celery_periodic_task(task_name)
+        task = get_celery_periodic_task(task_name)
+        if task is None:
+            logger.info('Clean task success: {}'.format(task_name))
+        else:
+            logger.info('Clean task failure: {}'.format(task))
+
+
+@shared_task
+@after_app_ready_start
 def create_or_update_registered_periodic_tasks():
     from .celery.decorator import get_register_period_tasks
     for task in get_register_period_tasks():
@@ -106,23 +133,19 @@ def create_or_update_registered_periodic_tasks():
 @shared_task
 @register_as_period_task(interval=3600)
 def check_server_performance_period():
-    usages = get_disk_usage()
-    uncheck_paths = ['/etc', '/boot']
-
-    for path, usage in usages.items():
-        need_check = True
-        for uncheck_path in uncheck_paths:
-            if path.startswith(uncheck_path):
-                need_check = False
-        if need_check and usage.percent > 80:
-            send_server_performance_mail(path, usage, usages)
+    ServerPerformanceCheckUtil().check_and_publish()
 
 
 @shared_task(queue="ansible")
 def hello(name, callback=None):
+    from users.models import User
     import time
-    time.sleep(10)
-    print("Hello {}".format(name))
+
+    count = User.objects.count()
+    print(gettext("Hello") + ': ' + name)
+    print("Count: ", count)
+    time.sleep(1)
+    return gettext("Hello")
 
 
 @shared_task
@@ -155,3 +178,4 @@ def add_m(x):
         s.append(add.s(i))
     res = chain(*tuple(s))()
     return res
+

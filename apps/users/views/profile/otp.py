@@ -1,39 +1,47 @@
 # ~*~ coding: utf-8 ~*~
+import time
 
-from django.urls import reverse_lazy, reverse
+from django.urls import reverse
 from django.utils.translation import ugettext as _
 from django.views.generic.base import TemplateView
 from django.views.generic.edit import FormView
 from django.contrib.auth import logout as auth_logout
-from django.conf import settings
+from django.shortcuts import redirect
+from django.http.response import HttpResponseRedirect
 
-from common.utils import get_logger
+from authentication.mixins import AuthMixin
+from authentication.mfa import MFAOtp, otp_failed_msg
+from authentication.errors import SessionEmptyError
+from common.utils import get_logger, FlashMessageUtil
+from common.mixins.views import PermissionsMixin
 from common.permissions import IsValidUser
-from ... import forms
 from .password import UserVerifyPasswordView
+from ... import forms
 from ...utils import (
-    generate_otp_uri, check_otp_code, get_user_or_pre_auth_user,
+    generate_otp_uri, check_otp_code,
+    get_user_or_pre_auth_user,
 )
 
 __all__ = [
     'UserOtpEnableStartView',
     'UserOtpEnableInstallAppView',
-    'UserOtpEnableBindView', 'UserOtpSettingsSuccessView',
-    'UserDisableMFAView', 'UserOtpUpdateView',
+    'UserOtpEnableBindView',
+    'UserOtpDisableView',
 ]
 
 logger = get_logger(__name__)
 
 
-class UserOtpEnableStartView(UserVerifyPasswordView):
+class UserOtpEnableStartView(AuthMixin, TemplateView):
     template_name = 'users/user_otp_check_password.html'
 
-    def get_success_url(self):
-        if settings.OTP_IN_RADIUS:
-            success_url = reverse_lazy('users:user-otp-settings-success')
-        else:
-            success_url = reverse('users:user-otp-enable-install-app')
-        return success_url
+    def get(self, request, *args, **kwargs):
+        try:
+            self.get_user_from_session()
+        except SessionEmptyError:
+            url = reverse('authentication:login') + '?_=otp_enable_start'
+            return redirect(url)
+        return super().get(request, *args, **kwargs)
 
 
 class UserOtpEnableInstallAppView(TemplateView):
@@ -46,29 +54,71 @@ class UserOtpEnableInstallAppView(TemplateView):
         return super().get_context_data(**kwargs)
 
 
-class UserOtpEnableBindView(TemplateView, FormView):
+class UserOtpEnableBindView(AuthMixin, TemplateView, FormView):
     template_name = 'users/user_otp_enable_bind.html'
     form_class = forms.UserCheckOtpCodeForm
-    success_url = reverse_lazy('users:user-otp-settings-success')
+
+    def get(self, request, *args, **kwargs):
+        pre_response = self._pre_check_can_bind()
+        if pre_response:
+            return pre_response
+        return super().get(request, *args, **kwargs)
+
+    def post(self, request, *args, **kwargs):
+        pre_response = self._pre_check_can_bind()
+        if pre_response:
+            return pre_response
+        return super().post(request, *args, **kwargs)
+
+    def _pre_check_can_bind(self):
+        try:
+            user = self.get_user_from_session()
+        except Exception as e:
+            verify_url = reverse('authentication:user-otp-enable-start') + f'?e={e}'
+            return HttpResponseRedirect(verify_url)
+
+        if user.otp_secret_key:
+            return self.has_already_bound_message()
+        return None
+
+    @staticmethod
+    def has_already_bound_message():
+        message_data = {
+            'title': _('Already bound'),
+            'error': _('MFA already bound, disable first, then bound'),
+            'interval': 10,
+            'redirect_url': reverse('authentication:user-otp-disable'),
+        }
+        response = FlashMessageUtil.gen_and_redirect_to(message_data)
+        return response
 
     def form_valid(self, form):
         otp_code = form.cleaned_data.get('otp_code')
         otp_secret_key = self.request.session.get('otp_secret_key', '')
 
         valid = check_otp_code(otp_secret_key, otp_code)
-        if valid:
-            self.save_otp(otp_secret_key)
-            return super().form_valid(form)
-        else:
-            error = _("MFA code invalid, or ntp sync server time")
-            form.add_error("otp_code", error)
+        if not valid:
+            form.add_error("otp_code", otp_failed_msg)
             return self.form_invalid(form)
+
+        self.save_otp(otp_secret_key)
+        auth_logout(self.request)
+        return super().form_valid(form)
 
     def save_otp(self, otp_secret_key):
         user = get_user_or_pre_auth_user(self.request)
-        user.enable_mfa()
         user.otp_secret_key = otp_secret_key
-        user.save()
+        user.save(update_fields=['otp_secret_key'])
+
+    def get_success_url(self):
+        message_data = {
+            'title': _('OTP enable success'),
+            'message': _('OTP enable success, return login page'),
+            'interval': 5,
+            'redirect_url': reverse('authentication:login'),
+        }
+        url = FlashMessageUtil.gen_message_url(message_data)
+        return url
 
     def get_context_data(self, **kwargs):
         user = get_user_or_pre_auth_user(self.request)
@@ -83,54 +133,40 @@ class UserOtpEnableBindView(TemplateView, FormView):
         return super().get_context_data(**kwargs)
 
 
-class UserDisableMFAView(FormView):
-    template_name = 'users/user_disable_mfa.html'
+class UserOtpDisableView(PermissionsMixin, FormView):
+    template_name = 'users/user_verify_mfa.html'
     form_class = forms.UserCheckOtpCodeForm
-    success_url = reverse_lazy('users:user-otp-settings-success')
     permission_classes = [IsValidUser]
 
     def form_valid(self, form):
         user = self.request.user
         otp_code = form.cleaned_data.get('otp_code')
+        otp = MFAOtp(user)
 
-        valid = user.check_mfa(otp_code)
-        if valid:
-            user.disable_mfa()
-            user.save()
-            return super().form_valid(form)
-        else:
-            error = _('MFA code invalid, or ntp sync server time')
+        ok, error = otp.check_code(otp_code)
+        if not ok:
             form.add_error('otp_code', error)
             return super().form_invalid(form)
 
-
-class UserOtpUpdateView(UserDisableMFAView):
-    success_url = reverse_lazy('users:user-otp-enable-bind')
-
-
-class UserOtpSettingsSuccessView(TemplateView):
-    template_name = 'flash_message_standalone.html'
+        otp.disable()
+        auth_logout(self.request)
+        return super().form_valid(form)
 
     def get_context_data(self, **kwargs):
-        title, describe = self.get_title_describe()
-        context = {
-            'title': title,
-            'messages': describe,
-            'interval': 1,
-            'redirect_url': reverse('authentication:login'),
-            'auto_redirect': True,
-        }
-        kwargs.update(context)
-        return super().get_context_data(**kwargs)
+        context = super().get_context_data(**kwargs)
+        context.update({
+            'title': _("Disable OTP")
+        })
+        return context
 
-    def get_title_describe(self):
-        user = get_user_or_pre_auth_user(self.request)
-        if self.request.user.is_authenticated:
-            auth_logout(self.request)
-        title = _('MFA enable success')
-        describe = _('MFA enable success, return login page')
-        if not user.mfa_enabled:
-            title = _('MFA disable success')
-            describe = _('MFA disable success, return login page')
-        return title, describe
+    def get_success_url(self):
+        message_data = {
+            'title': _('OTP disable success'),
+            'message': _('OTP disable success, return login page'),
+            'interval': 5,
+            'redirect_url': reverse('authentication:login'),
+        }
+        url = FlashMessageUtil.gen_message_url(message_data)
+        return url
+
 

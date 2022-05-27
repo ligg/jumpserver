@@ -55,30 +55,21 @@ api_info = openapi.Info(
     description="JumpServer Restful api docs",
     terms_of_service="https://www.jumpserver.org",
     contact=openapi.Contact(email="support@fit2cloud.com"),
-    license=openapi.License(name="GPLv2 License"),
+    license=openapi.License(name="GPLv3 License"),
 )
 
 
 def get_swagger_view(version='v1'):
-    from ..urls import api_v1, api_v2
+    from ..urls import api_v1
     from django.urls import path, include
     api_v1_patterns = [
         path('api/v1/', include(api_v1))
     ]
-
-    api_v2_patterns = [
-        path('api/v2/', include(api_v2))
-    ]
-
-    if version == "v2":
-        patterns = api_v2_patterns
-    else:
-        patterns = api_v1_patterns
+    patterns = api_v1_patterns
     schema_view = get_schema_view(
         api_info,
-        public=True,
         patterns=patterns,
-        permission_classes=(permissions.AllowAny,),
+        permission_classes=(permissions.IsAuthenticated,),
     )
     return schema_view
 

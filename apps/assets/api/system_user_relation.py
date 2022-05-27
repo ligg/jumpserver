@@ -1,30 +1,35 @@
 # -*- coding: utf-8 -*-
 #
 from collections import defaultdict
-from django.db.models import F, Value
+from django.db.models import F, Value, Model
 from django.db.models.signals import m2m_changed
 from django.db.models.functions import Concat
 
-from common.permissions import IsOrgAdmin
+from common.utils import get_logger
 from orgs.mixins.api import OrgBulkModelViewSet
 from orgs.utils import current_org
 from .. import models, serializers
 
 __all__ = [
     'SystemUserAssetRelationViewSet', 'SystemUserNodeRelationViewSet',
-    'SystemUserUserRelationViewSet',
+    'SystemUserUserRelationViewSet', 'BaseRelationViewSet',
 ]
+
+logger = get_logger(__name__)
 
 
 class RelationMixin:
+    model: Model
+
     def get_queryset(self):
         queryset = self.model.objects.all()
-        org_id = current_org.org_id()
-        if org_id is not None:
+        if not current_org.is_root():
+            org_id = current_org.org_id()
             queryset = queryset.filter(systemuser__org_id=org_id)
+
         queryset = queryset.annotate(systemuser_display=Concat(
-            F('systemuser__name'), Value('('), F('systemuser__username'),
-            Value(')')
+            F('systemuser__name'), Value('('),
+            F('systemuser__username'), Value(')')
         ))
         return queryset
 
@@ -40,10 +45,11 @@ class RelationMixin:
             system_users_objects_map[i.systemuser].append(_id)
 
         sender = self.get_sender()
-        for system_user, objects in system_users_objects_map.items():
+        for system_user, object_ids in system_users_objects_map.items():
+            logger.debug('System user relation changed, send m2m_changed signals')
             m2m_changed.send(
                 sender=sender, instance=system_user, action='post_add',
-                reverse=False, model=model, pk_set=objects
+                reverse=False, model=model, pk_set=set(object_ids)
             )
 
     def get_sender(self):
@@ -58,19 +64,19 @@ class RelationMixin:
 
 
 class BaseRelationViewSet(RelationMixin, OrgBulkModelViewSet):
-    pass
+    perm_model = models.SystemUser
 
 
 class SystemUserAssetRelationViewSet(BaseRelationViewSet):
+    perm_model = models.AuthBook
     serializer_class = serializers.SystemUserAssetRelationSerializer
     model = models.SystemUser.assets.through
-    permission_classes = (IsOrgAdmin,)
     filterset_fields = [
         'id', 'asset', 'systemuser',
     ]
     search_fields = [
         "id", "asset__hostname", "asset__ip",
-        "systemuser__name", "systemuser__username"
+        "systemuser__name", "systemuser__username",
     ]
 
     def get_objects_attr(self):
@@ -90,12 +96,11 @@ class SystemUserAssetRelationViewSet(BaseRelationViewSet):
 class SystemUserNodeRelationViewSet(BaseRelationViewSet):
     serializer_class = serializers.SystemUserNodeRelationSerializer
     model = models.SystemUser.nodes.through
-    permission_classes = (IsOrgAdmin,)
     filterset_fields = [
         'id', 'node', 'systemuser',
     ]
     search_fields = [
-        "node__value", "systemuser__name", "systemuser_username"
+        "node__value", "systemuser__name", "systemuser__username"
     ]
 
     def get_objects_attr(self):
@@ -111,7 +116,6 @@ class SystemUserNodeRelationViewSet(BaseRelationViewSet):
 class SystemUserUserRelationViewSet(BaseRelationViewSet):
     serializer_class = serializers.SystemUserUserRelationSerializer
     model = models.SystemUser.users.through
-    permission_classes = (IsOrgAdmin,)
     filterset_fields = [
         'id', 'user', 'systemuser',
     ]
@@ -133,4 +137,3 @@ class SystemUserUserRelationViewSet(BaseRelationViewSet):
             )
         )
         return queryset
-

@@ -15,6 +15,7 @@ dump.rdb
 .tox
 .cache/
 .idea/
+.vscode/
 db.sqlite3
 config.py
 config.yml
@@ -36,3 +37,6 @@ xpack
 logs/*
 ### Vagrant ###
 .vagrant/
+release/*
+releashe
+/apps/script.py

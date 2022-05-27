@@ -1,199 +1,139 @@
 # ~*~ coding: utf-8 ~*~
 #
-from treelib import Tree
-from treelib.exceptions import NodeIDAbsentError
 from collections import defaultdict
-from copy import deepcopy
+from common.utils import get_logger, dict_get_any, is_uuid, get_object_or_none, timeit
+from common.http import is_true
+from common.struct import Stack
+from common.db.models import output_as_string
+from orgs.utils import ensure_in_real_or_default_org, current_org
 
-from common.utils import get_logger, timeit, lazyproperty
-from .models import Asset, Node
-
+from .locks import NodeTreeUpdateLock
+from .models import Node, Asset
 
 logger = get_logger(__file__)
 
 
-class TreeService(Tree):
-    tag_sep = ' / '
+@NodeTreeUpdateLock()
+@ensure_in_real_or_default_org
+def check_node_assets_amount():
+    logger.info(f'Check node assets amount {current_org}')
+    nodes = list(Node.objects.all().only('id', 'key', 'assets_amount'))
+    nodeid_assetid_pairs = list(Asset.nodes.through.objects.all().values_list('node_id', 'asset_id'))
 
-    @staticmethod
+    nodekey_assetids_mapper = defaultdict(set)
+    nodeid_nodekey_mapper = {}
+    for node in nodes:
+        nodeid_nodekey_mapper[node.id] = node.key
+
+    for nodeid, assetid in nodeid_assetid_pairs:
+        if nodeid not in nodeid_nodekey_mapper:
+            continue
+        nodekey = nodeid_nodekey_mapper[nodeid]
+        nodekey_assetids_mapper[nodekey].add(assetid)
+
+    util = NodeAssetsUtil(nodes, nodekey_assetids_mapper)
+    util.generate()
+
+    to_updates = []
+    for node in nodes:
+        assets_amount = util.get_assets_amount(node.key)
+        if node.assets_amount != assets_amount:
+            logger.error(f'Node[{node.key}] assets amount error {node.assets_amount} != {assets_amount}')
+            node.assets_amount = assets_amount
+            to_updates.append(node)
+    Node.objects.bulk_update(to_updates, fields=('assets_amount',))
+
+
+def is_query_node_all_assets(request):
+    request = request
+    query_all_arg = request.query_params.get('all', 'true')
+    show_current_asset_arg = request.query_params.get('show_current_asset')
+    if show_current_asset_arg is not None:
+        return not is_true(show_current_asset_arg)
+    return is_true(query_all_arg)
+
+
+def get_node(request):
+    node_id = dict_get_any(request.query_params, ['node', 'node_id'])
+    if not node_id:
+        return None
+
+    if is_uuid(node_id):
+        node = get_object_or_none(Node, id=node_id)
+    else:
+        node = get_object_or_none(Node, key=node_id)
+    return node
+
+
+class NodeAssetsInfo:
+    __slots__ = ('key', 'assets_amount', 'assets')
+
+    def __init__(self, key, assets_amount, assets):
+        self.key = key
+        self.assets_amount = assets_amount
+        self.assets = assets
+
+    def __str__(self):
+        return self.key
+
+
+class NodeAssetsUtil:
+    def __init__(self, nodes, nodekey_assetsid_mapper):
+        """
+        :param nodes: 节点
+        :param nodekey_assetsid_mapper:  节点直接资产id的映射 {"key1": set(), "key2": set()}
+        """
+        self.nodes = nodes
+        # node_id --> set(asset_id1, asset_id2)
+        self.nodekey_assetsid_mapper = nodekey_assetsid_mapper
+        self.nodekey_assetsinfo_mapper = {}
+
     @timeit
-    def get_nodes_assets_map():
-        nodes_assets_map = defaultdict(set)
-        asset_node_list = Node.assets.through.objects.values_list(
-            'asset', 'node__key'
-        )
-        for asset_id, key in asset_node_list:
-            nodes_assets_map[key].add(asset_id)
-        return nodes_assets_map
+    def generate(self):
+        # 准备排序好的资产信息数据
+        infos = []
+        for node in self.nodes:
+            assets = self.nodekey_assetsid_mapper.get(node.key, set())
+            info = NodeAssetsInfo(key=node.key, assets_amount=0, assets=assets)
+            infos.append(info)
+        infos = sorted(infos, key=lambda i: [int(i) for i in i.key.split(':')])
+        # 这个守卫需要添加一下，避免最后一个无法出栈
+        guarder = NodeAssetsInfo(key='', assets_amount=0, assets=set())
+        infos.append(guarder)
+
+        stack = Stack()
+        for info in infos:
+            # 如果栈顶的不是这个节点的父祖节点，那么可以出栈了，可以计算资产数量了
+            while stack.top and not info.key.startswith(f'{stack.top.key}:'):
+                pop_info = stack.pop()
+                pop_info.assets_amount = len(pop_info.assets)
+                self.nodekey_assetsinfo_mapper[pop_info.key] = pop_info
+                if not stack.top:
+                    continue
+                stack.top.assets.update(pop_info.assets)
+            stack.push(info)
+
+    def get_assets_by_key(self, key):
+        info = self.nodekey_assetsinfo_mapper[key]
+        return info['assets']
+
+    def get_assets_amount(self, key):
+        info = self.nodekey_assetsinfo_mapper[key]
+        return info.assets_amount
 
     @classmethod
-    @timeit
-    def new(cls):
-        from .models import Node
-        all_nodes = list(Node.objects.all().values("key", "value"))
-        all_nodes.sort(key=lambda x: len(x["key"].split(":")))
-        tree = cls()
-        tree.create_node(tag='', identifier='', data={})
-        for node in all_nodes:
-            key = node["key"]
-            value = node["value"]
-            parent_key = ":".join(key.split(":")[:-1])
-            tree.safe_create_node(
-                tag=value, identifier=key,
-                parent=parent_key,
-            )
-        tree.init_assets()
-        return tree
+    def test_it(cls):
+        from assets.models import Node, Asset
 
-    def init_assets(self):
-        node_assets_map = self.get_nodes_assets_map()
-        for node in self.all_nodes_itr():
-            key = node.identifier
-            assets = node_assets_map.get(key, set())
-            data = {"assets": assets, "all_assets": None}
-            node.data = data
+        nodes = list(Node.objects.all())
+        nodes_assets = Asset.nodes.through.objects.all()\
+            .annotate(aid=output_as_string('asset_id'))\
+            .values_list('node__key', 'aid')
 
-    def safe_create_node(self, **kwargs):
-        parent = kwargs.get("parent")
-        if not self.contains(parent):
-            kwargs['parent'] = self.root
-        self.create_node(**kwargs)
+        mapping = defaultdict(set)
+        for key, asset_id in nodes_assets:
+            mapping[key].add(asset_id)
 
-    def all_children_ids(self, nid, with_self=True):
-        children_ids = self.expand_tree(nid)
-        if not with_self:
-            next(children_ids)
-        return list(children_ids)
-
-    def all_children(self, nid, with_self=True, deep=False):
-        children_ids = self.all_children_ids(nid, with_self=with_self)
-        return [self.get_node(i, deep=deep) for i in children_ids]
-
-    def ancestors_ids(self, nid, with_self=True):
-        ancestor_ids = list(self.rsearch(nid))
-        ancestor_ids.pop()
-        if not with_self:
-            ancestor_ids.pop(0)
-        return ancestor_ids
-
-    def ancestors(self, nid, with_self=False, deep=False, with_assets=True):
-        ancestor_ids = self.ancestors_ids(nid, with_self=with_self)
-        ancestors = [self.get_node(i, deep=deep) for i in ancestor_ids]
-        if with_assets:
-            return ancestors
-        for n in ancestors:
-            n.data['assets'] = set()
-            n.data['all_assets'] = None
-        return ancestors
-
-    def get_node_full_tag(self, nid):
-        ancestors = self.ancestors(nid, with_self=True)
-        ancestors.reverse()
-        return self.tag_sep.join([n.tag for n in ancestors])
-
-    def get_family(self, nid, deep=False):
-        ancestors = self.ancestors(nid, with_self=False, deep=deep)
-        children = self.all_children(nid, with_self=False)
-        return ancestors + [self[nid]] + children
-
-    @staticmethod
-    def is_parent(child, parent):
-        parent_id = child.bpointer
-        return parent_id == parent.identifier
-
-    def root_node(self):
-        return self.get_node(self.root)
-
-    def get_node(self, nid, deep=False):
-        node = super().get_node(nid)
-        if deep:
-            node = self.copy_node(node)
-        return node
-
-    def parent(self, nid, deep=False):
-        parent = super().parent(nid)
-        if deep:
-            parent = self.copy_node(parent)
-        return parent
-
-    @lazyproperty
-    def invalid_assets(self):
-        assets = Asset.objects.filter(is_active=False).values_list('id', flat=True)
-        return assets
-
-    def set_assets(self, nid, assets):
-        node = self.get_node(nid)
-        if node.data is None:
-            node.data = {}
-        node.data["assets"] = assets
-
-    def assets(self, nid):
-        node = self.get_node(nid)
-        return node.data.get("assets", set())
-
-    def valid_assets(self, nid):
-        return set(self.assets(nid)) - set(self.invalid_assets)
-
-    def all_assets(self, nid):
-        node = self.get_node(nid)
-        if node.data is None:
-            node.data = {}
-        all_assets = node.data.get("all_assets")
-        if all_assets is not None:
-            return all_assets
-        all_assets = set(self.assets(nid))
-        try:
-            children = self.children(nid)
-        except NodeIDAbsentError:
-            children = []
-        for child in children:
-            all_assets.update(self.all_assets(child.identifier))
-        node.data["all_assets"] = all_assets
-        return all_assets
-
-    def all_valid_assets(self, nid):
-        return set(self.all_assets(nid)) - set(self.invalid_assets)
-
-    def assets_amount(self, nid):
-        return len(self.all_assets(nid))
-
-    def valid_assets_amount(self, nid):
-        return len(self.all_valid_assets(nid))
-
-    @staticmethod
-    def copy_node(node):
-        new_node = deepcopy(node)
-        new_node.fpointer = None
-        return new_node
-
-    def safe_add_ancestors(self, node, ancestors):
-        # 如果没有祖先节点，那么添加该节点, 父节点是root node
-        if len(ancestors) == 0:
-            parent = self.root_node()
-        else:
-            parent = ancestors[0]
-
-        # 如果当前节点已再树中，则移动当前节点到父节点中
-        # 这个是由于 当前节点放到了二级节点中
-        if not self.contains(parent.identifier):
-            # logger.debug('Add parent: {}'.format(parent.identifier))
-            self.safe_add_ancestors(parent, ancestors[1:])
-
-        if self.contains(node.identifier):
-            # msg = 'Move node to parent: {} => {}'.format(
-            #     node.identifier, parent.identifier
-            # )
-            # logger.debug(msg)
-            self.move_node(node.identifier, parent.identifier)
-        else:
-            # logger.debug('Add node: {}'.format(node.identifier))
-            self.add_node(node, parent)
-    #
-    # def __getstate__(self):
-    #     self.mutex = None
-    #     self.all_nodes_assets_map = {}
-    #     self.nodes_assets_map = {}
-    #     return self.__dict__
-
-    # def __setstate__(self, state):
-    #     self.__dict__ = state
+        util = cls(nodes, mapping)
+        util.generate()
+        return util

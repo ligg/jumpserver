@@ -29,9 +29,7 @@ class JMSBaseInventory(BaseInventory):
         if asset.domain and asset.domain.has_gateway():
             info["vars"].update(self.make_proxy_command(asset))
         if run_as_admin:
-            info.update(asset.get_auth_info())
-            if asset.is_unixlike():
-                info["become"] = asset.admin_user.become_info
+            info.update(asset.get_auth_info(with_become=True))
         if asset.is_windows():
             info["vars"].update({
                 "ansible_connection": "ssh",
@@ -76,7 +74,7 @@ class JMSInventory(JMSBaseInventory):
     write you own inventory, construct you inventory,
     user_info  is obtained from admin_user or asset_user
     """
-    def __init__(self, assets, run_as_admin=False, run_as=None, become_info=None):
+    def __init__(self, assets, run_as_admin=False, run_as=None, become_info=None, system_user=None):
         """
         :param assets: assets
         :param run_as_admin: True 是否使用管理用户去执行, 每台服务器的管理用户可能不同
@@ -86,6 +84,7 @@ class JMSInventory(JMSBaseInventory):
         self.assets = assets
         self.using_admin = run_as_admin
         self.run_as = run_as
+        self.system_user = system_user
         self.become_info = become_info
 
         host_list = []
@@ -102,20 +101,20 @@ class JMSInventory(JMSBaseInventory):
         super().__init__(host_list=host_list)
 
     def get_run_user_info(self, host):
-        from assets.backends import AssetUserManager
-
-        if self.run_as is None:
+        if not self.run_as and not self.system_user:
             return {}
 
-        try:
-            asset = self.assets.get(id=host.get('id'))
-            manager = AssetUserManager()
-            run_user = manager.get_latest(username=self.run_as, asset=asset)
-        except Exception as e:
-            logger.error(e, exc_info=True)
+        asset_id = host.get('id', '')
+        asset = self.assets.filter(id=asset_id).first()
+        if not asset:
+            logger.error('Host not found: ', asset_id)
             return {}
+
+        if self.system_user:
+            self.system_user.load_asset_special_auth(asset=asset, username=self.run_as)
+            return self.system_user._to_secret_json()
         else:
-            return run_user._to_secret_json()
+            return {}
 
 
 class JMSCustomInventory(JMSBaseInventory):

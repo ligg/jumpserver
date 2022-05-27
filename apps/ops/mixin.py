@@ -95,22 +95,22 @@ class PeriodTaskModelMixin(models.Model):
     @property
     def schedule(self):
         from django_celery_beat.models import PeriodicTask
-        try:
-            return PeriodicTask.objects.get(name=str(self))
-        except PeriodicTask.DoesNotExist:
-            return None
+        name = self.get_register_task()[0]
+        return PeriodicTask.objects.filter(name=name).first()
 
     class Meta:
         abstract = True
 
 
 class PeriodTaskSerializerMixin(serializers.Serializer):
-    is_periodic = serializers.BooleanField(default=False, label=_("Periodic perform"))
+    is_periodic = serializers.BooleanField(default=True, label=_("Periodic perform"))
     crontab = serializers.CharField(
         max_length=128, allow_blank=True,
         allow_null=True, required=False, label=_('Regularly perform')
     )
-    interval = serializers.IntegerField(allow_null=True, required=False)
+    interval = serializers.IntegerField(
+        default=24, allow_null=True, required=False, label=_('Interval')
+    )
 
     INTERVAL_MAX = 65535
     INTERVAL_MIN = 1
@@ -124,7 +124,7 @@ class PeriodTaskSerializerMixin(serializers.Serializer):
         return crontab
 
     def validate_interval(self, interval):
-        if not interval:
+        if not interval and not isinstance(interval, int):
             return interval
         msg = _("Range {} to {}").format(self.INTERVAL_MIN, self.INTERVAL_MAX)
         if interval > self.INTERVAL_MAX or interval < self.INTERVAL_MIN:
@@ -159,7 +159,7 @@ class PeriodTaskFormMixin(forms.Form):
     )
     interval = forms.IntegerField(
         required=False, initial=24,
-        help_text=_('Tips: (Units: hour)'), label=_("Cycle perform"),
+        help_text=_('Unit: hour'), label=_("Cycle perform"),
     )
 
     def get_initial_for_field(self, field, field_name):

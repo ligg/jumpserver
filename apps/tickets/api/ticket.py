@@ -1,44 +1,108 @@
 # -*- coding: utf-8 -*-
 #
-
 from rest_framework import viewsets
-from django.shortcuts import get_object_or_404
+from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed
+from rest_framework.response import Response
 
-from common.permissions import IsValidUser
-from common.utils import lazyproperty
-from .. import serializers, models, mixins
+from common.const.http import POST, PUT
+from common.mixins.api import CommonApiMixin
+from common.drf.api import JMSBulkModelViewSet
+
+from rbac.permissions import RBACPermission
+
+from tickets import serializers
+from tickets.models import Ticket, TicketFlow
+from tickets.filters import TicketFilter
+from tickets.permissions.ticket import IsAssignee, IsApplicant
+
+__all__ = ['TicketViewSet', 'TicketFlowViewSet']
 
 
-class TicketViewSet(mixins.TicketMixin, viewsets.ModelViewSet):
-    serializer_class = serializers.TicketSerializer
-    queryset = models.Ticket.objects.all()
-    permission_classes = (IsValidUser,)
-    filter_fields = ['status', 'title', 'action', 'user_display']
-    search_fields = ['user_display', 'title']
+class TicketViewSet(CommonApiMixin, viewsets.ModelViewSet):
+    serializer_class = serializers.TicketDisplaySerializer
+    serializer_classes = {
+        'open': serializers.TicketApplySerializer,
+        'approve': serializers.TicketApproveSerializer,
+    }
+    filterset_class = TicketFilter
+    search_fields = [
+        'title', 'action', 'type', 'status', 'applicant_display'
+    ]
+    ordering_fields = (
+        'title', 'applicant_display', 'status', 'state', 'action_display',
+        'date_created', 'serial_num',
+    )
+    ordering = ('-date_created',)
+    rbac_perms = {
+        'open': 'tickets.view_ticket',
+    }
 
+    def create(self, request, *args, **kwargs):
+        raise MethodNotAllowed(self.action)
 
-class TicketCommentViewSet(viewsets.ModelViewSet):
-    serializer_class = serializers.CommentSerializer
-    http_method_names = ['get', 'post']
+    def update(self, request, *args, **kwargs):
+        raise MethodNotAllowed(self.action)
 
-    def check_permissions(self, request):
-        ticket = self.ticket
-        if request.user == ticket.user or \
-                request.user in ticket.assignees.all():
-            return True
-        return False
-
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
-        context['ticket'] = self.ticket
-        return context
-
-    @lazyproperty
-    def ticket(self):
-        ticket_id = self.kwargs.get('ticket_id')
-        ticket = get_object_or_404(models.Ticket, pk=ticket_id)
-        return ticket
+    def destroy(self, request, *args, **kwargs):
+        raise MethodNotAllowed(self.action)
 
     def get_queryset(self):
-        queryset = self.ticket.comments.all()
+        queryset = Ticket.get_user_related_tickets(self.request.user)
         return queryset
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        applicant = self.request.user
+        instance.create_related_node(applicant)
+        instance.process_map = instance.create_process_map(applicant)
+        instance.open(applicant)
+
+    @action(detail=False, methods=[POST], permission_classes=[RBACPermission, ])
+    def open(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)
+
+    @action(detail=True, methods=[PUT], permission_classes=[IsAssignee, ])
+    def approve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        instance.approve(processor=request.user)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=[PUT], permission_classes=[IsAssignee, ])
+    def reject(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        instance.reject(processor=request.user)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=[PUT], permission_classes=[IsApplicant, ])
+    def close(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        instance.close(processor=request.user)
+        return Response(serializer.data)
+
+
+class TicketFlowViewSet(JMSBulkModelViewSet):
+    serializer_class = serializers.TicketFlowSerializer
+
+    filterset_fields = ['id', 'type']
+    search_fields = ['id', 'type']
+
+    def destroy(self, request, *args, **kwargs):
+        raise MethodNotAllowed(self.action)
+
+    def get_queryset(self):
+        queryset = TicketFlow.get_org_related_flows()
+        return queryset
+
+    def perform_create_or_update(self, serializer):
+        instance = serializer.save()
+        instance.save()
+
+    def perform_create(self, serializer):
+        self.perform_create_or_update(serializer)
+
+    def perform_update(self, serializer):
+        self.perform_create_or_update(serializer)

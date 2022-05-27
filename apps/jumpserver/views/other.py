@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
 #
 import re
-import time
 
-from django.http import HttpResponseRedirect, JsonResponse
+from django.http import HttpResponseRedirect, JsonResponse, Http404
 from django.conf import settings
-from django.views.generic import View
+from django.views.generic import View, TemplateView
+from django.shortcuts import redirect
 from django.utils.translation import ugettext_lazy as _
-from rest_framework.views import APIView
 from django.views.decorators.csrf import csrf_exempt
 from django.http import HttpResponse
+from rest_framework.views import APIView
 
 from common.http import HttpResponseTemporaryRedirect
 
 
 __all__ = [
-    'LunaView', 'I18NView', 'KokoView', 'WsView', 'HealthCheckView',
-    'redirect_format_api'
+    'LunaView', 'I18NView', 'KokoView', 'WsView',
+    'redirect_format_api', 'redirect_old_apps_view', 'UIView',
+    'ResourceDownload',
 ]
 
 
@@ -51,11 +52,15 @@ def redirect_format_api(request, *args, **kwargs):
         return JsonResponse({"msg": "Redirect url failed: {}".format(_path)}, status=404)
 
 
-class HealthCheckView(APIView):
-    permission_classes = ()
-
-    def get(self, request):
-        return JsonResponse({"status": 1, "time": int(time.time())})
+@csrf_exempt
+def redirect_old_apps_view(request, *args, **kwargs):
+    path = request.get_full_path()
+    if path.find('/core') != -1:
+        raise Http404()
+    if path in ['/docs/', '/docs', '/core/docs/', '/core/docs']:
+        return redirect('/api/docs/')
+    new_path = '/core{}'.format(path)
+    return HttpResponseTemporaryRedirect(new_path)
 
 
 class WsView(APIView):
@@ -67,9 +72,19 @@ class WsView(APIView):
         return JsonResponse({"msg": msg})
 
 
+class UIView(View):
+    def get(self, request):
+        msg = "如果你能看到这个页面，证明你的配置是有问题的，请参考文档设置好nginx, UI由Lina项目提供"
+        return HttpResponse(msg)
+
+
 class KokoView(View):
     def get(self, request):
         msg = _(
             "<div>Koko is a separately deployed program, you need to deploy Koko, configure nginx for url distribution,</div> "
             "</div>If you see this page, prove that you are not accessing the nginx listening port. Good luck.</div>")
         return HttpResponse(msg)
+
+
+class ResourceDownload(TemplateView):
+    template_name = 'resource_download.html'

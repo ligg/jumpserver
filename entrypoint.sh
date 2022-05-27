@@ -7,15 +7,16 @@ function cleanup()
     fi
 }
 
-service="all"
-if [[ "$1" != "" ]];then
-    service=$1
-fi
+action="${1-start}"
+service="${2-all}"
 
 trap cleanup EXIT
-if [[ "$1" == "bash" ]];then
+if [[ "$action" == "bash" || "$action" == "sh" ]];then
     bash
+elif [[ "$action" == "sleep" ]];then
+    echo "Sleep 365 days"
+    sleep 365d
 else
-    python jms start ${service}
+    python jms "${action}" "${service}"
 fi
 

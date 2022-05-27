@@ -20,9 +20,6 @@ configs["CELERY_QUEUES"] = [
     Queue("celery", Exchange("celery"), routing_key="celery"),
     Queue("ansible", Exchange("ansible"), routing_key="ansible"),
 ]
-configs["CELERY_ROUTES"] = {
-    "ops.tasks.run_ansible_task": {'exchange': 'ansible', 'routing_key': 'ansible'},
-}
 
 app.namespace = 'CELERY'
 app.conf.update(configs)

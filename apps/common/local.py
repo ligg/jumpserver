@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-#
 from werkzeug.local import Local
 
 thread_local = Local()

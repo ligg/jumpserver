@@ -1,0 +1,21 @@
+{% load i18n %}
+<div>
+    <p>
+        {{ title | safe }}
+    </p>
+    <div>
+        {{ body | safe }}
+    </div>
+    <br>
+    <div>
+        <a href="{{ ticket_detail_url }}" target="_blank">
+            {% trans 'View details' %}
+        </a>
+        <br>
+        {% if ticket_approval_url %}
+            <a href="{{ ticket_approval_url }}" target="_blank">
+                {% trans 'Direct approval' %}
+            </a>
+        {% endif %}
+    </div>
+</div>

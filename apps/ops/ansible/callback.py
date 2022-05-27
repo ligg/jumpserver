@@ -5,10 +5,12 @@ import json
 import os
 from collections import defaultdict
 
-from ansible import constants as C
+import ansible.constants as C
 from ansible.plugins.callback import CallbackBase
 from ansible.plugins.callback.default import CallbackModule
 from ansible.plugins.callback.minimal import CallbackModule as CMDCallBackModule
+
+from common.utils.strings import safe_str
 
 
 class CallbackMixin:
@@ -60,11 +62,17 @@ class CallbackMixin:
         self.results_raw[t][host][task_name] = task_result
         self.clean_result(t, host, task_name, task_result)
 
+    def close(self):
+        if hasattr(self._display, 'close'):
+            self._display.close()
+
 
 class AdHocResultCallback(CallbackMixin, CallbackModule, CMDCallBackModule):
     """
     Task result Callback
     """
+    context = None
+
     def clean_result(self, t, host, task_name, task_result):
         contacted = self.results_summary["contacted"]
         dark = self.results_summary["dark"]
@@ -78,7 +86,7 @@ class AdHocResultCallback(CallbackMixin, CallbackModule, CMDCallBackModule):
             detail = {
                 'cmd': cmd,
                 'stderr': task_result.get('stderr'),
-                'stdout': task_result.get('stdout'),
+                'stdout': safe_str(str(task_result.get('stdout', ''))),
                 'rc': task_result.get('rc'),
                 'delta': task_result.get('delta'),
                 'msg': task_result.get('msg', '')
@@ -123,6 +131,9 @@ class AdHocResultCallback(CallbackMixin, CallbackModule, CMDCallBackModule):
         self.gather_result("unreachable", result)
         super().v2_runner_on_unreachable(result)
 
+    def v2_runner_on_start(self, *args, **kwargs):
+        pass
+
     def display_skipped_hosts(self):
         pass
 
@@ -133,7 +144,11 @@ class AdHocResultCallback(CallbackMixin, CallbackModule, CMDCallBackModule):
         pass
 
     def set_play_context(self, context):
-        context.ssh_args = '-C -o ControlMaster=no'
+        # for k, v in context._attributes.items():
+        #     print("{} ==> {}".format(k, v))
+        if self.context and isinstance(self.context, dict):
+            for k, v in self.context.items():
+                setattr(context, k, v)
 
 
 class CommandResultCallback(AdHocResultCallback):
@@ -191,6 +206,9 @@ class CommandResultCallback(AdHocResultCallback):
             msg,
         ), color=C.COLOR_ERROR)
 
+    def v2_playbook_on_stats(self, stats):
+        pass
+
     def _print_task_banner(self, task):
         pass
 
@@ -200,7 +218,7 @@ class CommandResultCallback(AdHocResultCallback):
         if t == "ok":
             cmd['cmd'] = res._result.get('cmd')
             cmd['stderr'] = res._result.get('stderr')
-            cmd['stdout'] = res._result.get('stdout')
+            cmd['stdout'] = safe_str(str(res._result.get('stdout', '')))
             cmd['rc'] = res._result.get('rc')
             cmd['delta'] = res._result.get('delta')
         else:

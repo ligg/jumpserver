@@ -1,10 +1,12 @@
 # ~*~ coding: utf-8 ~*~
 
 import os
+
 import shutil
 from collections import namedtuple
 
 from ansible import context
+from ansible.playbook import Playbook
 from ansible.module_utils.common.collections import ImmutableDict
 from ansible.executor.task_queue_manager import TaskQueueManager
 from ansible.vars.manager import VariableManager
@@ -18,6 +20,7 @@ from .callback import (
 )
 from common.utils import get_logger
 from .exceptions import AnsibleError
+from .display import AdHocDisplay
 
 
 __all__ = ["AdHocRunner", "PlayBookRunner", "CommandRunner"]
@@ -130,8 +133,8 @@ class AdHocRunner:
             loader=self.loader, inventory=self.inventory
         )
 
-    def get_result_callback(self, file_obj=None):
-        return self.__class__.results_callback_class()
+    def get_result_callback(self, execution_id=None):
+        return self.__class__.results_callback_class(display=AdHocDisplay(execution_id))
 
     @staticmethod
     def check_module_args(module_name, module_args=''):
@@ -182,7 +185,14 @@ class AdHocRunner:
             _options.update(options)
         return _options
 
-    def run(self, tasks, pattern, play_name='Ansible Ad-hoc', gather_facts='no'):
+    def set_control_master_if_need(self, cleaned_tasks):
+        modules = [task.get('action', {}).get('module') for task in cleaned_tasks]
+        if {'ping', 'win_ping'} & set(modules):
+            self.results_callback.context = {
+                'ssh_args': '-C -o ControlMaster=no'
+            }
+
+    def run(self, tasks, pattern, play_name='Ansible Ad-hoc', gather_facts='no', execution_id=None):
         """
         :param tasks: [{'action': {'module': 'shell', 'args': 'ls'}, ...}, ]
         :param pattern: all, *, or others
@@ -191,8 +201,9 @@ class AdHocRunner:
         :return:
         """
         self.check_pattern(pattern)
-        self.results_callback = self.get_result_callback()
+        self.results_callback = self.get_result_callback(execution_id)
         cleaned_tasks = self.clean_tasks(tasks)
+        self.set_control_master_if_need(cleaned_tasks)
         context.CLIARGS = ImmutableDict(self.options)
 
         play_source = dict(
@@ -207,6 +218,11 @@ class AdHocRunner:
             variable_manager=self.variable_manager,
             loader=self.loader,
         )
+        loader = DataLoader()
+        # used in start callback
+        playbook = Playbook(loader)
+        playbook._entries.append(play)
+        playbook._file_name = '__adhoc_playbook__'
 
         tqm = TaskQueueManager(
             inventory=self.inventory,
@@ -216,7 +232,9 @@ class AdHocRunner:
             passwords={"conn_pass": self.options.get("password", "")}
         )
         try:
+            tqm.send_callback('v2_playbook_on_start', playbook)
             tqm.run(play)
+            tqm.send_callback('v2_playbook_on_stats', tqm._stats)
             return self.results_callback
         except Exception as e:
             raise AnsibleError(e)
@@ -224,6 +242,8 @@ class AdHocRunner:
             if tqm is not None:
                 tqm.cleanup()
             shutil.rmtree(C.DEFAULT_LOCAL_TMP, True)
+
+            self.results_callback.close()
 
 
 class CommandRunner(AdHocRunner):

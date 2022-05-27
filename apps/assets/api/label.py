@@ -17,7 +17,6 @@ from django.db.models import Count
 
 from common.utils import get_logger
 from orgs.mixins.api import OrgBulkModelViewSet
-from ..hands import IsOrgAdmin
 from ..models import Label
 from .. import serializers
 
@@ -28,9 +27,8 @@ __all__ = ['LabelViewSet']
 
 class LabelViewSet(OrgBulkModelViewSet):
     model = Label
-    filter_fields = ("name", "value")
-    search_fields = filter_fields
-    permission_classes = (IsOrgAdmin,)
+    filterset_fields = ("name", "value")
+    search_fields = filterset_fields
     serializer_class = serializers.LabelSerializer
 
     def list(self, request, *args, **kwargs):

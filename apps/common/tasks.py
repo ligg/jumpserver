@@ -1,9 +1,10 @@
-from django.core.mail import send_mail
+import os
+
+from django.core.mail import send_mail, EmailMultiAlternatives
 from django.conf import settings
 from celery import shared_task
 
 from .utils import get_logger
-
 
 logger = get_logger(__file__)
 
@@ -24,12 +25,32 @@ def send_mail_async(*args, **kwargs):
     """
     if len(args) == 3:
         args = list(args)
-        args[0] = settings.EMAIL_SUBJECT_PREFIX + args[0]
-        email_from = settings.EMAIL_FROM or settings.EMAIL_HOST_USER
-        args.insert(2, email_from)
+        args[0] = (settings.EMAIL_SUBJECT_PREFIX or '') + args[0]
+        from_email = settings.EMAIL_FROM or settings.EMAIL_HOST_USER
+        args.insert(2, from_email)
         args = tuple(args)
 
     try:
         return send_mail(*args, **kwargs)
     except Exception as e:
         logger.error("Sending mail error: {}".format(e))
+
+
+@shared_task
+def send_mail_attachment_async(subject, message, recipient_list, attachment_list=None):
+    if attachment_list is None:
+        attachment_list = []
+    from_email = settings.EMAIL_FROM or settings.EMAIL_HOST_USER
+    email = EmailMultiAlternatives(
+        subject=subject,
+        body=message,
+        from_email=from_email,
+        to=recipient_list
+    )
+    for attachment in attachment_list:
+        email.attach_file(attachment)
+        os.remove(attachment)
+    try:
+        return email.send()
+    except Exception as e:
+        logger.error("Sending mail attachment error: {}".format(e))

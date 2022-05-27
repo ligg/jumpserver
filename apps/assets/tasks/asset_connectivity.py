@@ -2,11 +2,11 @@
 from itertools import groupby
 from collections import defaultdict
 from celery import shared_task
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext_noop
 
 from common.utils import get_logger
 from orgs.utils import org_aware_func
-from ..models.utils import Connectivity
+from ..models import Asset, Connectivity, AuthBook
 from . import const
 from .utils import clean_ansible_task_hosts, group_asset_by_platform
 
@@ -14,8 +14,30 @@ from .utils import clean_ansible_task_hosts, group_asset_by_platform
 logger = get_logger(__file__)
 __all__ = [
     'test_asset_connectivity_util', 'test_asset_connectivity_manual',
-    'test_node_assets_connectivity_manual',
+    'test_node_assets_connectivity_manual', 'test_assets_connectivity_manual',
 ]
+
+
+def set_assets_accounts_connectivity(assets, results_summary):
+    asset_ids_ok = set()
+    asset_ids_failed = set()
+
+    asset_hostnames_ok = results_summary.get('contacted', {}).keys()
+
+    for asset in assets:
+        if asset.hostname in asset_hostnames_ok:
+            asset_ids_ok.add(asset.id)
+        else:
+            asset_ids_failed.add(asset.id)
+
+    Asset.bulk_set_connectivity(asset_ids_ok, Connectivity.ok)
+    Asset.bulk_set_connectivity(asset_ids_failed, Connectivity.failed)
+
+    accounts_ok = AuthBook.objects.filter(asset_id__in=asset_ids_ok, systemuser__type='admin')
+    accounts_failed = AuthBook.objects.filter(asset_id__in=asset_ids_failed, systemuser__type='admin')
+
+    AuthBook.bulk_set_connectivity(accounts_ok, Connectivity.ok)
+    AuthBook.bulk_set_connectivity(accounts_failed, Connectivity.failed)
 
 
 @shared_task(queue="ansible")
@@ -24,7 +46,7 @@ def test_asset_connectivity_util(assets, task_name=None):
     from ops.utils import update_or_create_ansible_task
 
     if task_name is None:
-        task_name = _("Test assets connectivity")
+        task_name = gettext_noop("Test assets connectivity. ")
 
     hosts = clean_ansible_task_hosts(assets)
     if not hosts:
@@ -60,20 +82,13 @@ def test_asset_connectivity_util(assets, task_name=None):
         results_summary['contacted'].update(contacted)
         results_summary['dark'].update(dark)
         continue
-
-    for asset in assets:
-        if asset.hostname in results_summary.get('dark', {}).keys():
-            asset.connectivity = Connectivity.unreachable()
-        elif asset.hostname in results_summary.get('contacted', {}).keys():
-            asset.connectivity = Connectivity.reachable()
-        else:
-            asset.connectivity = Connectivity.unknown()
+    set_assets_accounts_connectivity(assets, results_summary)
     return results_summary
 
 
 @shared_task(queue="ansible")
 def test_asset_connectivity_manual(asset):
-    task_name = _("Test assets connectivity: {}").format(asset)
+    task_name = gettext_noop("Test assets connectivity: ") + str(asset)
     summary = test_asset_connectivity_util([asset], task_name=task_name)
 
     if summary.get('dark'):
@@ -83,9 +98,19 @@ def test_asset_connectivity_manual(asset):
 
 
 @shared_task(queue="ansible")
+def test_assets_connectivity_manual(assets):
+    task_name = gettext_noop("Test assets connectivity: ") + str([asset.hostname for asset in assets])
+    summary = test_asset_connectivity_util(assets, task_name=task_name)
+
+    if summary.get('dark'):
+        return False, summary['dark']
+    else:
+        return True, ""
+
+
+@shared_task(queue="ansible")
 def test_node_assets_connectivity_manual(node):
-    task_name = _("Test if the assets under the node are connectable: {}".format(node.name))
+    task_name = gettext_noop("Test if the assets under the node are connectable: ") + node.name
     assets = node.get_all_assets()
     result = test_asset_connectivity_util(assets, task_name=task_name)
     return result
-

@@ -1,10 +1,11 @@
 # ~*~ coding: utf-8 ~*~
 
-from rest_framework.views import APIView, Response
 from django.views.generic.detail import SingleObjectMixin
+from django.utils.translation import ugettext as _
+from rest_framework.views import APIView, Response
+from rest_framework.serializers import ValidationError
 
 from common.utils import get_logger
-from common.permissions import IsOrgAdmin, IsOrgAdminOrAppUser
 from orgs.mixins.api import OrgBulkModelViewSet
 from ..models import Domain, Gateway
 from .. import serializers
@@ -16,10 +17,11 @@ __all__ = ['DomainViewSet', 'GatewayViewSet', "GatewayTestConnectionApi"]
 
 class DomainViewSet(OrgBulkModelViewSet):
     model = Domain
-    filter_fields = ("name", )
-    search_fields = filter_fields
-    permission_classes = (IsOrgAdminOrAppUser,)
+    filterset_fields = ("name", )
+    search_fields = filterset_fields
     serializer_class = serializers.DomainSerializer
+    ordering_fields = ('name',)
+    ordering = ('name', )
 
     def get_serializer_class(self):
         if self.request.query_params.get('gateway'):
@@ -29,19 +31,25 @@ class DomainViewSet(OrgBulkModelViewSet):
 
 class GatewayViewSet(OrgBulkModelViewSet):
     model = Gateway
-    filter_fields = ("domain__name", "name", "username", "ip", "domain")
+    filterset_fields = ("domain__name", "name", "username", "ip", "domain")
     search_fields = ("domain__name", "name", "username", "ip")
-    permission_classes = (IsOrgAdmin,)
     serializer_class = serializers.GatewaySerializer
 
 
 class GatewayTestConnectionApi(SingleObjectMixin, APIView):
-    permission_classes = (IsOrgAdmin,)
+    queryset = Gateway.objects.all()
     object = None
+    rbac_perms = {
+        'POST': 'assets.test_gateway'
+    }
 
     def post(self, request, *args, **kwargs):
         self.object = self.get_object(Gateway.objects.all())
         local_port = self.request.data.get('port') or self.object.port
+        try:
+            local_port = int(local_port)
+        except ValueError:
+            raise ValidationError({'port': _('Number required')})
         ok, e = self.object.test_connective(local_port=local_port)
         if ok:
             return Response("ok")

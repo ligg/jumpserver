@@ -1,25 +1,31 @@
 # -*- coding: utf-8 -*-
 #
-from django.contrib.auth import authenticate
 
-from . import errors
+from django.conf import settings
+
+from common.utils import validate_ip, get_ip_city, get_request_ip
+from common.utils import get_logger
+from audits.models import UserLoginLog
+from audits.const import DEFAULT_CITY
+from .notifications import DifferentCityLoginMessage
+
+logger = get_logger(__file__)
 
 
-def check_user_valid(**kwargs):
-    password = kwargs.pop('password', None)
-    public_key = kwargs.pop('public_key', None)
-    username = kwargs.pop('username', None)
-    request = kwargs.get('request')
+def check_different_city_login_if_need(user, request):
+    if not settings.SECURITY_CHECK_DIFFERENT_CITY_LOGIN:
+        return
 
-    user = authenticate(request, username=username,
-                        password=password, public_key=public_key)
-    if not user:
-        return None, errors.reason_password_failed
-    elif user.is_expired:
-        return None, errors.reason_user_inactive
-    elif not user.is_active:
-        return None, errors.reason_user_inactive
-    elif user.password_has_expired:
-        return None, errors.reason_password_expired
+    ip = get_request_ip(request) or '0.0.0.0'
+    if not (ip and validate_ip(ip)):
+        city = DEFAULT_CITY
+    else:
+        city = get_ip_city(ip) or DEFAULT_CITY
 
-    return user, ''
+    city_white = ['LAN', ]
+    if city not in city_white:
+        last_user_login = UserLoginLog.objects.exclude(city__in=city_white) \
+            .filter(username=user.username, status=True).first()
+
+        if last_user_login and last_user_login.city != city:
+            DifferentCityLoginMessage(user, ip, city).publish_async()
