@@ -8,8 +8,7 @@ __all__ = ['PublicSettingSerializer', 'PrivateSettingSerializer']
 
 class PublicSettingSerializer(serializers.Serializer):
     XPACK_ENABLED = serializers.BooleanField()
-    LOGIN_TITLE = serializers.CharField()
-    LOGO_URLS = serializers.DictField()
+    INTERFACE = serializers.DictField()
 
 
 class PrivateSettingSerializer(PublicSettingSerializer):
@@ -35,11 +34,12 @@ class PrivateSettingSerializer(PublicSettingSerializer):
     AUTH_FEISHU = serializers.BooleanField()
     AUTH_TEMP_TOKEN = serializers.BooleanField()
 
-    XRDP_ENABLED = serializers.BooleanField()
+    TERMINAL_RAZOR_ENABLED = serializers.BooleanField()
     TERMINAL_MAGNUS_ENABLED = serializers.BooleanField()
     TERMINAL_KOKO_SSH_ENABLED = serializers.BooleanField()
+    TERMINAL_OMNIDB_ENABLED = serializers.BooleanField()
 
     ANNOUNCEMENT_ENABLED = serializers.BooleanField()
-    ANNOUNCEMENT = serializers.CharField()
-    
+    ANNOUNCEMENT = serializers.DictField()
+
     TICKETS_ENABLED = serializers.BooleanField()

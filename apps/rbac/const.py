@@ -40,6 +40,10 @@ exclude_permissions = (
     ('assets', 'gathereduser', 'add,delete,change', 'gathereduser'),
     ('assets', 'accountbackupplanexecution', 'delete,change', 'accountbackupplanexecution'),
     ('assets', 'authbook', 'change', 'authbook'),
+    # TODO 暂时去掉历史账号的权限
+    ('assets', 'authbook', '*', 'assethistoryaccount'),
+    ('assets', 'authbook', '*', 'assethistoryaccountsecret'),
+
     ('perms', 'userassetgrantedtreenoderelation', '*', '*'),
     ('perms', 'usergrantedmappingnode', '*', '*'),
     ('perms', 'permnode', '*', '*'),
@@ -69,6 +73,11 @@ exclude_permissions = (
     ('tickets', 'ticket', 'add,delete,change', 'ticket'),
     ('tickets', 'ticketstep', '*', '*'),
     ('tickets', 'approvalrule', '*', '*'),
+    ('tickets', 'applyloginticket', '*', '*'),
+    ('tickets', 'applyloginassetticket', '*', '*'),
+    ('tickets', 'applycommandticket', '*', '*'),
+    ('tickets', 'applyassetticket', '*', '*'),
+    ('tickets', 'applyapplicationticket', '*', '*'),
     ('tickets', 'superticket', 'delete', 'superticket'),
     ('tickets', 'ticketsession', 'view,delete', 'ticketsession'),
     ('xpack', 'interface', '*', '*'),
