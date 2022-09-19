@@ -43,6 +43,9 @@ DEBUG_DEV = CONFIG.DEBUG_DEV
 # Absolute url for some case, for example email link
 SITE_URL = CONFIG.SITE_URL
 
+# https://docs.djangoproject.com/en/4.1/ref/settings/
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 # LOG LEVEL
 LOG_LEVEL = CONFIG.LOG_LEVEL
 
@@ -106,6 +109,7 @@ MIDDLEWARE = [
     'authentication.backends.oidc.middleware.OIDCRefreshIDTokenMiddleware',
     'authentication.backends.cas.middleware.CASMiddleware',
     'authentication.middleware.MFAMiddleware',
+    'authentication.middleware.ThirdPartyLoginMiddleware',
     'authentication.middleware.SessionCookieMiddleware',
     'simple_history.middleware.HistoryRequestMiddleware',
 ]
@@ -138,6 +142,7 @@ WSGI_APPLICATION = 'jumpserver.wsgi.application'
 
 LOGIN_REDIRECT_URL = reverse_lazy('index')
 LOGIN_URL = reverse_lazy('authentication:login')
+LOGOUT_REDIRECT_URL = CONFIG.LOGOUT_REDIRECT_URL
 
 SESSION_COOKIE_DOMAIN = CONFIG.SESSION_COOKIE_DOMAIN
 CSRF_COOKIE_DOMAIN = CONFIG.SESSION_COOKIE_DOMAIN
@@ -307,6 +312,21 @@ CSRF_COOKIE_SECURE = CONFIG.CSRF_COOKIE_SECURE
 
 DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 
+PASSWORD_HASHERS = [
+    'django.contrib.auth.hashers.PBKDF2PasswordHasher',
+    'django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher',
+    'django.contrib.auth.hashers.Argon2PasswordHasher',
+    'django.contrib.auth.hashers.BCryptSHA256PasswordHasher',
+]
+
+
+GMSSL_ENABLED = CONFIG.GMSSL_ENABLED
+GM_HASHER = 'common.hashers.PBKDF2SM3PasswordHasher'
+if GMSSL_ENABLED:
+    PASSWORD_HASHERS.insert(0, GM_HASHER)
+else:
+    PASSWORD_HASHERS.append(GM_HASHER)
+
 # For Debug toolbar
 INTERNAL_IPS = ["127.0.0.1"]
 if os.environ.get('DEBUG_TOOLBAR', False):
@@ -315,3 +335,4 @@ if os.environ.get('DEBUG_TOOLBAR', False):
     DEBUG_TOOLBAR_PANELS = [
         'debug_toolbar.panels.profiling.ProfilingPanel',
     ]
+

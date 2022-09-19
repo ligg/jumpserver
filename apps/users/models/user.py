@@ -628,6 +628,8 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
         radius = 'radius', 'Radius'
         cas = 'cas', 'CAS'
         saml2 = 'saml2', 'SAML2'
+        oauth2 = 'oauth2', 'OAuth2'
+        custom = 'custom', 'Custom'
 
     SOURCE_BACKEND_MAPPING = {
         Source.local: [
@@ -652,6 +654,12 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
         Source.saml2: [
             settings.AUTH_BACKEND_SAML2
         ],
+        Source.oauth2: [
+            settings.AUTH_BACKEND_OAUTH2
+        ],
+        Source.custom: [
+            settings.AUTH_BACKEND_CUSTOM
+        ]
     }
 
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
@@ -796,7 +804,8 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
     def is_password_authenticate(self):
         cas = self.Source.cas
         saml2 = self.Source.saml2
-        return self.source not in [cas, saml2]
+        oauth2 = self.Source.oauth2
+        return self.source not in [cas, saml2, oauth2]
 
     def set_unprovide_attr_if_need(self):
         if not self.name:
