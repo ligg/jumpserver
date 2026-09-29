@@ -1,12 +1,10 @@
 {% load i18n %}
 <p>
-    {% trans 'Hello' %} {{ name }},
+    {% trans 'Dear' %} {{ name }},
 </p>
 
 <p>
-    {% blocktranslate %}
-        The following {{ item_type }} will expire in {{ count }} days
-    {% endblocktranslate %}
+    {% blocktranslate %}The following {{ item_type }} will expire in {{ count }}{% endblocktranslate %}
 </p>
 
 <ul>
@@ -15,8 +13,7 @@
     {% endfor %}
 </ul>
 
-<br />
--
+<br>
 <p>
     {% trans 'If you have any question, please contact the administrator' %}
 </p>

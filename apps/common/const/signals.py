@@ -15,3 +15,5 @@ POST_CLEAR = 'post_clear'
 
 POST_PREFIX = 'post'
 PRE_PREFIX = 'pre'
+
+OP_LOG_SKIP_SIGNAL = 'operate_log_skip_signal'

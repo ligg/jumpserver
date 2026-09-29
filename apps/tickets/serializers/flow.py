@@ -1,106 +1,121 @@
-from django.db.transaction import atomic
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
+from common.serializers.fields import LabeledChoiceField, JSONManyToManyField, ObjectRelatedField
+from orgs.mixins.serializers import OrgResourceModelSerializerMixin
 from orgs.models import Organization
 from orgs.utils import get_current_org_id
-from orgs.mixins.serializers import OrgResourceModelSerializerMixin
+from tickets.const import TicketLevel, TicketType
 from tickets.models import TicketFlow, ApprovalRule
-from tickets.const import TicketApprovalStrategy
+from users.models import User
 
-__all__ = ['TicketFlowSerializer']
+__all__ = ['TicketFlowSerializer', 'TicketFlowOptionSerializer']
 
 
 class TicketFlowApproveSerializer(serializers.ModelSerializer):
-    strategy_display = serializers.ReadOnlyField(source='get_strategy_display', label=_('Approve strategy'))
-    assignees_read_only = serializers.SerializerMethodField(label=_('Assignees'))
-    assignees_display = serializers.SerializerMethodField(label=_('Assignees display'))
+    users = JSONManyToManyField(label=_('User'))
 
     class Meta:
         model = ApprovalRule
-        fields_small = [
-            'level', 'strategy', 'assignees_read_only', 'assignees_display', 'strategy_display'
-        ]
-        fields_m2m = ['assignees', ]
-        fields = fields_small + fields_m2m
-        read_only_fields = ['level', 'assignees_display']
-        extra_kwargs = {
-            'assignees': {'write_only': True, 'allow_empty': True, 'required': False}
-        }
+        fields = ['level', 'users']
+        read_only_fields = ['level']
 
-    @staticmethod
-    def get_assignees_display(instance):
-        return [str(assignee) for assignee in instance.get_assignees()]
-
-    @staticmethod
-    def get_assignees_read_only(instance):
-        if instance.strategy == TicketApprovalStrategy.custom_user:
-            return instance.assignees.values_list('id', flat=True)
-        return []
-
-    def validate(self, attrs):
-        if attrs['strategy'] == TicketApprovalStrategy.custom_user and not attrs.get('assignees'):
-            error = _('Please select the Assignees')
-            raise serializers.ValidationError({'assignees': error})
-        return super().validate(attrs)
+    def validate_users(self, value):
+        rule = ApprovalRule()
+        rule.users.set(value)
+        assignees = rule.get_assignees(org_id=get_current_org_id())
+        if not assignees.exists():
+            error = _('No approvers matched. Please update the approval rule')
+            raise serializers.ValidationError(error)
+        return value
 
 
 class TicketFlowSerializer(OrgResourceModelSerializerMixin):
-    type_display = serializers.ReadOnlyField(source='get_type_display', label=_('Type display'))
+    name = serializers.CharField(
+        required=True, allow_blank=False, max_length=128, label=_('Name')
+    )
+    type = LabeledChoiceField(
+        choices=TicketType.choices, read_only=True, label=_('Type')
+    )
     rules = TicketFlowApproveSerializer(many=True, required=True)
+    cc_users = ObjectRelatedField(
+        queryset=User.objects, many=True, required=False,
+        attrs=('id', 'name', 'username'), label=_('CC users')
+    )
 
     class Meta:
         model = TicketFlow
-        fields_mini = ['id', ]
+        fields_mini = ['id', 'name', 'type']
         fields_small = fields_mini + [
-            'type', 'type_display', 'approval_level', 'created_by', 'date_created', 'date_updated',
-            'org_id', 'org_name'
+            'approval_level', 'created_by', 'date_created',
+            'date_updated', 'org_id', 'org_name'
         ]
-        fields = fields_small + ['rules', ]
-        read_only_fields = ['created_by', 'org_id', 'date_created', 'date_updated']
-        extra_kwargs = {
-            'type': {'required': True},
-            'approval_level': {'required': True}
-        }
+        fields = fields_small + ['rules', 'cc_users']
+        read_only_fields = ['created_by', 'date_created', 'date_updated']
 
-    def validate_type(self, value):
-        if not self.instance or (self.instance and self.instance.type != value):
-            if self.Meta.model.objects.filter(type=value).exists():
-                error = _('The current organization type already exists')
-                raise serializers.ValidationError(error)
-        return value
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        name = attrs.get('name', getattr(self.instance, 'name', ''))
+        ticket_type = attrs.get(
+            'type', getattr(self.instance, 'type', TicketType.apply_asset)
+        )
+        current_org_id = str(get_current_org_id())
+        flows = TicketFlow.objects.filter(
+            org_id=current_org_id, name__iexact=name, type=ticket_type
+        )
+        if self.instance and self.instance.org_id == current_org_id:
+            flows = flows.exclude(id=self.instance.id)
+        if flows.exists():
+            error = _('A ticket flow with the same name and type already exists')
+            raise serializers.ValidationError({'name': error})
+
+        approval_level = attrs.get(
+            'approval_level', getattr(self.instance, 'approval_level', TicketLevel.one)
+        )
+        rules = attrs.get('rules')
+        if rules is not None and len(rules) != approval_level:
+            error = _('The number of approval rules must match the approval level')
+            raise serializers.ValidationError({'rules': error})
+        return attrs
 
     def create_or_update(self, action, validated_data, instance=None):
-        related = 'rules'
-        assignees = 'assignees'
-        childs = validated_data.pop(related, [])
-        if not instance:
+        children = validated_data.pop('rules', [])
+        if instance is None:
             instance = getattr(super(), action)(validated_data)
         else:
             instance = getattr(super(), action)(instance, validated_data)
-            getattr(instance, related).all().delete()
-        instance_related = getattr(instance, related)
-        child_instances = []
-        related_model = instance_related.model
-        # Todo: 这个权限的判断
-        for level, data in enumerate(childs, 1):
-            data_m2m = data.pop(assignees, None)
-            child_instance = related_model.objects.create(**data, level=level)
-            getattr(child_instance, assignees).set(data_m2m)
-            child_instances.append(child_instance)
-        instance_related.set(child_instances)
+            instance.rules.all().delete()
+
+        child_instances = [
+            instance.rules.model.objects.create(**data, level=level)
+            for level, data in enumerate(children, 1)
+        ]
+        instance.rules.set(child_instances)
         return instance
 
-    @atomic
     def create(self, validated_data):
+        validated_data['type'] = TicketType.apply_asset
         return self.create_or_update('create', validated_data)
 
-    @atomic
     def update(self, instance, validated_data):
-        current_org_id = get_current_org_id()
+        current_org_id = str(get_current_org_id())
         root_org_id = Organization.ROOT_ID
         if instance.org_id == root_org_id and current_org_id != root_org_id:
             instance = self.create(validated_data)
         else:
             instance = self.create_or_update('update', validated_data, instance)
         return instance
+
+
+class TicketFlowOptionSerializer(serializers.ModelSerializer):
+    type = LabeledChoiceField(choices=TicketType.choices, read_only=True, label=_('Type'))
+    approval_level = LabeledChoiceField(
+        choices=TicketLevel.choices, read_only=True, label=_('Approve level')
+    )
+    cc_users = ObjectRelatedField(
+        many=True, read_only=True, attrs=('id', 'name', 'username'), label=_('CC users')
+    )
+
+    class Meta:
+        model = TicketFlow
+        fields = ['id', 'name', 'type', 'approval_level', 'cc_users']

@@ -1,48 +1,11 @@
-from random import choice
 import random
+from random import choice
+
 import forgery_py
 
-from .base import FakeDataGenerator
-
+from assets.const import AllTypes
 from assets.models import *
-
-
-class AdminUsersGenerator(FakeDataGenerator):
-    resource = 'admin_user'
-
-    def do_generate(self, batch, batch_size):
-        admin_users = []
-        for i in batch:
-            username = forgery_py.internet.user_name(True)
-            password = forgery_py.basic.password()
-            admin_users.append(AdminUser(
-                name=username.title(),
-                username=username,
-                password=password,
-                org_id=self.org.id,
-                created_by='Fake',
-            ))
-        AdminUser.objects.bulk_create(admin_users, ignore_conflicts=True)
-
-
-class SystemUsersGenerator(FakeDataGenerator):
-    def do_generate(self, batch, batch_size):
-        system_users = []
-        protocols = list(dict(SystemUser.Protocol.choices).keys())
-        for i in batch:
-            username = forgery_py.internet.user_name(True)
-            protocol = random.choice(protocols)
-            name = username.title()
-            name = f'{name}-{protocol}'
-            system_users.append(SystemUser(
-                name=name,
-                username=username,
-                password=forgery_py.basic.password(),
-                protocol=protocol,
-                org_id=self.org.id,
-                created_by='Fake',
-            ))
-        SystemUser.objects.bulk_create(system_users, ignore_conflicts=True)
+from .base import FakeDataGenerator
 
 
 class NodesGenerator(FakeDataGenerator):
@@ -55,14 +18,37 @@ class NodesGenerator(FakeDataGenerator):
             parent.create_child()
 
 
-class AssetsGenerator(FakeDataGenerator):
-    resource = 'asset'
-    admin_user_ids: list
-    node_ids: list
+class PlatformGenerator(FakeDataGenerator):
+    resource = 'platform'
+    category_type: dict
+    categories: list
 
     def pre_generate(self):
-        self.admin_user_ids = list(AdminUser.objects.all().values_list('id', flat=True))
+        self.category_type = dict(AllTypes.category_types())
+        self.categories = list(self.category_type.keys())
+
+    def do_generate(self, batch, batch_size):
+        platforms = []
+        for i in batch:
+            category = choice(self.categories)
+            tp = choice(self.category_type[category].choices)
+            data = {
+                'name': forgery_py.name.company_name(),
+                'category': category,
+                'type': tp[0]
+            }
+            platforms.append(Platform(**data))
+        Platform.objects.bulk_create(platforms, ignore_conflicts=True)
+
+
+class AssetsGenerator(FakeDataGenerator):
+    resource = 'asset'
+    node_ids: list
+    platform_ids: list
+
+    def pre_generate(self):
         self.node_ids = list(Node.objects.all().values_list('id', flat=True))
+        self.platform_ids = list(Platform.objects.filter(category='host').values_list('id', flat=True))
 
     def set_assets_nodes(self, assets):
         for asset in assets:
@@ -73,19 +59,30 @@ class AssetsGenerator(FakeDataGenerator):
         assets = []
 
         for i in batch:
-            ip = forgery_py.internet.ip_v4()
+            address = forgery_py.internet.ip_v4()
             hostname = forgery_py.email.address().replace('@', '.')
-            hostname = f'{hostname}-{ip}'
+            hostname = f'{hostname}-{address}'
             data = dict(
-                ip=ip,
-                hostname=hostname,
-                admin_user_id=choice(self.admin_user_ids),
+                address=address,
+                name=hostname,
+                platform_id=choice(self.platform_ids),
                 created_by='Fake',
                 org_id=self.org.id
             )
             assets.append(Asset(**data))
         creates = Asset.objects.bulk_create(assets, ignore_conflicts=True)
         self.set_assets_nodes(creates)
+        self.set_asset_platform(creates)
+
+    @staticmethod
+    def set_asset_platform(assets):
+        protocol = random.choice(['ssh', 'rdp', 'telnet', 'vnc'])
+        protocols = []
+
+        for asset in assets:
+            port = 22 if protocol == 'ssh' else 3389
+            protocols.append(Protocol(asset=asset, name=protocol, port=port))
+        Protocol.objects.bulk_create(protocols, ignore_conflicts=True)
 
     def after_generate(self):
         pass

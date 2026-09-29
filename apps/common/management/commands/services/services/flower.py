@@ -1,14 +1,10 @@
-from ..hands import *
 from .base import BaseService
+from ..hands import *
 
 __all__ = ['FlowerService']
 
 
 class FlowerService(BaseService):
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
     @property
     def cmd(self):
         print("\n- Start Flower as Task Monitor")
@@ -19,11 +15,11 @@ class FlowerService(BaseService):
             'celery',
             '-A', 'ops',
             'flower',
-            '-l', 'INFO',
+            '-logging=info',
             '--url_prefix=/core/flower',
             '--auto_refresh=False',
             '--max_tasks=1000',
-            '--tasks_columns=uuid,name,args,state,received,started,runtime,worker'
+            '--state_save_interval=600000'
         ]
         return cmd
 

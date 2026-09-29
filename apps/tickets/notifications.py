@@ -1,18 +1,18 @@
-from urllib.parse import urljoin
 import json
+from urllib.parse import urljoin
 
 from django.conf import settings
 from django.core.cache import cache
-from django.shortcuts import reverse
-from django.template.loader import render_to_string
 from django.forms import model_to_dict
-from django.utils.translation import ugettext_lazy as _
+from django.template.loader import render_to_string
+from django.utils.translation import gettext_lazy as _
 
-from notifications.notifications import UserMessage
-from common.utils import get_logger, random_string
 from common.db.encoder import ModelJSONFieldEncoder
-from .models import Ticket
+from common.sdk.im.wecom import wecom_tool
+from common.utils import get_logger, random_string, reverse
+from notifications.notifications import UserMessage
 from . import const
+from .models import Ticket, ApplyAssetTicket
 
 logger = get_logger(__file__)
 
@@ -22,16 +22,13 @@ class BaseTicketMessage(UserMessage):
     ticket: Ticket
     content_title: str
 
-    @property
-    def ticket_detail_url(self):
-        tp = self.ticket.type
-        return urljoin(
-            settings.SITE_URL,
-            const.TICKET_DETAIL_URL.format(
-                id=str(self.ticket.id),
-                type=tp
-            )
+    def get_ticket_detail_url(self, external=True):
+        detail_url = const.TICKET_DETAIL_URL.format(
+            id=str(self.ticket.id), type=self.ticket.type
         )
+        if not external:
+            return detail_url
+        return urljoin(settings.SITE_URL, detail_url)
 
     @property
     def content_title(self):
@@ -41,17 +38,31 @@ class BaseTicketMessage(UserMessage):
     def subject(self):
         raise NotImplementedError
 
-    def get_html_msg(self) -> dict:
-        context = dict(
-            title=self.content_title,
-            content=self.content,
-            ticket_detail_url=self.ticket_detail_url
+    def get_html_context(self):
+        return {'ticket_detail_url': self.get_ticket_detail_url()}
+
+    def get_wecom_context(self):
+        ticket_detail_url = wecom_tool.wrap_redirect_url(
+            self.get_ticket_detail_url(external=False)
         )
-        message = render_to_string('tickets/_msg_ticket.html', context)
-        return {
-            'subject': self.subject,
-            'message': message
+        return {'ticket_detail_url': ticket_detail_url}
+
+    def gen_html_string(self, **other_context):
+        context = {
+            'title': self.content_title, 'content': self.content,
         }
+        context.update(other_context)
+        message = render_to_string(
+            'tickets/_msg_ticket.html', context
+        )
+        return {'subject': self.subject, 'message': message}
+
+    def get_html_msg(self) -> dict:
+        return self.gen_html_string(**self.get_html_context())
+
+    def get_wecom_msg(self):
+        message = self.gen_html_string(**self.get_wecom_context())
+        return self.html_to_markdown(message)
 
     @classmethod
     def gen_test_msg(cls):
@@ -75,13 +86,18 @@ class BaseTicketMessage(UserMessage):
             field = fields[name]
             item = {'name': name, 'title': field.verbose_name}
             value = self.ticket.get_field_display(name, field, data)
+            if not value:
+                continue
             item['value'] = value
             items.append(item)
         return items
 
     @property
     def basic_items(self):
-        item_names = ['serial_num', 'title', 'type', 'state', 'applicant', 'comment']
+        item_names = [
+            'serial_num', 'title', 'type', 'state', 'org_id',
+            'applicant', 'cc_users', 'comment'
+        ]
         return self._get_fields_items(item_names)
 
     @property
@@ -94,19 +110,13 @@ class BaseTicketMessage(UserMessage):
 
 class TicketAppliedToAssigneeMessage(BaseTicketMessage):
     def __init__(self, user, ticket):
+        self.token = random_string(32)
         self.ticket = ticket
         super().__init__(user)
-        self._token = None
-
-    @property
-    def token(self):
-        if self._token is None:
-            self._token = random_string(32)
-        return self._token
 
     @property
     def content_title(self):
-        return _('Your has a new ticket, applicant - {}').format(self.ticket.applicant)
+        return _('You have a new ticket from {}').format(self.ticket.applicant)
 
     @property
     def subject(self):
@@ -117,25 +127,29 @@ class TicketAppliedToAssigneeMessage(BaseTicketMessage):
         )
         return title
 
-    def get_ticket_approval_url(self):
+    def get_ticket_approval_url(self, external=True):
+        if isinstance(self.ticket, ApplyAssetTicket):
+            no_assets = not self.ticket.apply_assets.exists()
+            no_nodes = not self.ticket.apply_nodes.exists()
+            no_accounts = not self.ticket.apply_accounts
+
+            if (no_assets and no_nodes) or no_accounts:
+                return None
+
         url = reverse('tickets:direct-approve', kwargs={'token': self.token})
+        if not external:
+            return url
         return urljoin(settings.SITE_URL, url)
 
-    def get_html_msg(self) -> dict:
-        context = dict(
-            title=self.content_title,
-            content=self.content,
-            ticket_detail_url=self.ticket_detail_url
-        )
-
-        ticket_approval_url = self.get_ticket_approval_url()
-        context.update({'ticket_approval_url': ticket_approval_url})
-        message = render_to_string('tickets/_msg_ticket.html', context)
-        cache.set(self.token, {'ticket_id': self.ticket.id, 'content': self.content}, 3600)
-        return {
-            'subject': self.subject,
-            'message': message
+    def get_html_context(self):
+        context = super().get_html_context()
+        context['ticket_approval_url'] = self.get_ticket_approval_url()
+        data = {
+            'ticket_id': self.ticket.id,
+            'approver_id': self.user.id, 'content': self.content,
         }
+        cache.set(self.token, data, 3600)
+        return context
 
     @classmethod
     def gen_test_msg(cls):
@@ -171,3 +185,27 @@ class TicketProcessedToApplicantMessage(BaseTicketMessage):
         user = User.objects.first()
         processor = User.objects.last()
         return cls(user, ticket, processor)
+
+
+class TicketUpdatedToCcUserMessage(BaseTicketMessage):
+    def __init__(self, user, ticket):
+        self.ticket = ticket
+        super().__init__(user)
+
+    @property
+    def content_title(self):
+        return _('A ticket you are copied on has been updated')
+
+    @property
+    def subject(self):
+        return _('Ticket updated - {} ({})').format(
+            self.ticket.title, self.ticket.get_type_display()
+        )
+
+    @classmethod
+    def gen_test_msg(cls):
+        from .models import Ticket
+        from users.models import User
+        ticket = Ticket.objects.first()
+        user = User.objects.first()
+        return cls(user, ticket)

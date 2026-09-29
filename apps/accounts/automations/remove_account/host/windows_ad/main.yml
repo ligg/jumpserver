@@ -1,0 +1,7 @@
+- hosts: windows
+  gather_facts: no
+  tasks:
+    - name: "Remove account"
+      microsoft.ad.user:
+        identity: "{{ account.username }}"
+        state: absent

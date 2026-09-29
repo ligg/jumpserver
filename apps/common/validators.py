@@ -2,12 +2,14 @@
 #
 import re
 
+import phonenumbers
 from django.core.validators import RegexValidator
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
+from phonenumbers.phonenumberutil import NumberParseException
+from rest_framework import serializers
 from rest_framework.validators import (
     UniqueTogetherValidator, ValidationError
 )
-from rest_framework import serializers
 
 from common.utils.strings import no_special_chars
 
@@ -42,9 +44,17 @@ class NoSpecialChars:
 
 
 class PhoneValidator:
-    pattern = re.compile(r"^1[3456789]\d{9}$")
     message = _('The mobile phone number format is incorrect')
 
     def __call__(self, value):
-        if not self.pattern.match(value):
+        if not value:
+            return
+
+        try:
+            phone = phonenumbers.parse(value, 'CN')
+            valid = phonenumbers.is_valid_number(phone)
+        except NumberParseException:
+            valid = False
+
+        if not valid:
             raise serializers.ValidationError(self.message)

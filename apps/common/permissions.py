@@ -1,83 +1,121 @@
 # -*- coding: utf-8 -*-
 #
+import hmac
 import time
 
 from django.conf import settings
+from django.core.cache import cache
 from rest_framework import permissions
 
-from authentication.const import ConfirmType
-from common.exceptions import UserConfirmRequired
-from orgs.utils import tmp_to_root_org
-from authentication.models import ConnectionToken
-from common.utils import get_object_or_none
 
-
-class IsValidUser(permissions.IsAuthenticated, permissions.BasePermission):
+class IsValidUser(permissions.IsAuthenticated):
     """Allows access to valid user, is active and not expired"""
 
     def has_permission(self, request, view):
-        return super(IsValidUser, self).has_permission(request, view) \
-               and request.user.is_valid
-
-
-class IsValidUserOrConnectionToken(IsValidUser):
-
-    def has_permission(self, request, view):
-        return super(IsValidUserOrConnectionToken, self).has_permission(request, view) \
-               or self.is_valid_connection_token(request)
-
-    @staticmethod
-    def is_valid_connection_token(request):
-        token_id = request.query_params.get('token')
-        if not token_id:
-            return False
-        with tmp_to_root_org():
-            token = get_object_or_none(ConnectionToken, id=token_id)
-        return token and token.is_valid
+        return super().has_permission(request, view) \
+            and request.user.is_valid
 
 
 class OnlySuperUser(IsValidUser):
     def has_permission(self, request, view):
         return super().has_permission(request, view) \
-               and request.user.is_superuser
+            and request.user.is_superuser
+
+
+class OnlyAdminSuperUser(IsValidUser):
+    def has_permission(self, request, view):
+        return super().has_permission(request, view) \
+            and request.user.is_superuser \
+            and request.user.username == 'admin'
+
+
+class IsServiceAccount(IsValidUser):
+    def has_permission(self, request, view):
+        return super().has_permission(request, view) \
+            and request.user.is_service_account
 
 
 class WithBootstrapToken(permissions.BasePermission):
+    def check_can_register(self):
+        enabled = settings.SECURITY_SERVICE_ACCOUNT_REGISTRATION
+        if enabled == 'auto':
+            if cache.get(f'APPLET_HOST_DELOYING'):
+                return True
+            return time.time() - settings.JUMPSERVER_UPTIME < 300
+        elif enabled:
+            return True
+        else:
+            return False
+
     def has_permission(self, request, view):
         authorization = request.META.get('HTTP_AUTHORIZATION', '')
         if not authorization:
             return False
+
+        if not self.check_can_register():
+            return False
+
         request_bootstrap_token = authorization.split()[-1]
-        return settings.BOOTSTRAP_TOKEN == request_bootstrap_token
+        return hmac.compare_digest(
+            settings.BOOTSTRAP_TOKEN.encode(),
+            request_bootstrap_token.encode()
+        )
 
 
-class UserConfirmation(permissions.BasePermission):
-    ttl = 60 * 5
-    min_level = 1
-    confirm_type = ConfirmType.ReLogin
+class ServiceAccountSignaturePermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        from authentication.models import AccessKey
+        from common.utils.crypto import get_aes_crypto
+        signature = request.META.get('HTTP_X_JMS_SVC', '')
+        if not signature or not signature.startswith('Sign'):
+            return False
+        data = signature[4:].strip()
+        if not data or ':' not in data:
+            return False
+        ak_id, time_sign = data.split(':', 1)
+        if not ak_id or not time_sign:
+            return False
+        ak = AccessKey.objects.filter(id=ak_id).first()
+        if not ak or not ak.is_active:
+            return False
+        if not ak.user or not ak.user.is_active or not ak.user.is_service_account:
+            return False
+        aes = get_aes_crypto(str(ak.secret).replace('-', ''), mode='ECB')
+        try:
+            timestamp = aes.decrypt(time_sign)
+            if not timestamp or not timestamp.isdigit():
+                return False
+            timestamp = int(timestamp)
+            interval = abs(int(time.time()) - timestamp)
+            if interval > 30:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def has_object_permission(self, request, view, obj):
+        return False
+
+
+class IsValidLicense(permissions.BasePermission):
 
     def has_permission(self, request, view):
-        if not settings.SECURITY_VIEW_AUTH_NEED_MFA:
+        return settings.XPACK_LICENSE_IS_VALID
+
+
+class IsValidLicenseForWriteAction(permissions.BasePermission):
+    """Allow read for all, require valid license for write operations"""
+
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
             return True
+        return settings.XPACK_LICENSE_IS_VALID
 
-        confirm_level = request.session.get('CONFIRM_LEVEL')
-        confirm_time = request.session.get('CONFIRM_TIME')
-        ttl = self.get_ttl()
-        if not confirm_level or not confirm_time or \
-                confirm_level < self.min_level or \
-                confirm_time < time.time() - ttl:
-            raise UserConfirmRequired(code=self.confirm_type)
-        return True
 
-    def get_ttl(self):
-        if self.confirm_type == ConfirmType.MFA:
-            ttl = settings.SECURITY_MFA_VERIFY_TTL
-        else:
-            ttl = self.ttl
-        return ttl
-
-    @classmethod
-    def require(cls, confirm_type=ConfirmType.ReLogin, ttl=60 * 5):
-        min_level = ConfirmType.values.index(confirm_type) + 1
-        name = 'UserConfirmationLevel{}TTL{}'.format(min_level, ttl)
-        return type(name, (cls,), {'min_level': min_level, 'ttl': ttl, 'confirm_type': confirm_type})
+class IsOwnerOrAdminWritable(IsValidUser):
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superuser:
+            return super().has_permission(request, view)
+        if request.method != 'GET' and obj.creator != request.user:
+            return False
+        return super().has_permission(request, view)

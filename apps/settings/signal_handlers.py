@@ -1,31 +1,30 @@
 # -*- coding: utf-8 -*-
 #
 import json
-import threading
-
-from django.conf import LazySettings
+import os
+import shutil
+from django.db import connections
+from django.conf import LazySettings, settings
+from django.db.models.signals import post_save
 from django.db.utils import ProgrammingError, OperationalError
 from django.dispatch import receiver
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_migrate
 from django.utils.functional import LazyObject
+from django.apps import apps
 
-from jumpserver.utils import current_request
-from common.decorator import on_transaction_commit
+from jumpserver.const import BASE_DIR
+from common.decorators import on_transaction_commit
+from common.signals import django_ready
 from common.utils import get_logger, ssh_key_gen
 from common.utils.connection import RedisPubSub
-from common.signals import django_ready
 from .models import Setting
 
 logger = get_logger(__file__)
 
 
-def get_settings_pub_sub():
-    return RedisPubSub('settings')
-
-
 class SettingSubPub(LazyObject):
     def _setup(self):
-        self._wrapped = get_settings_pub_sub()
+        self._wrapped = RedisPubSub('settings')
 
 
 setting_pub_sub = SettingSubPub()
@@ -36,15 +35,7 @@ setting_pub_sub = SettingSubPub()
 def refresh_settings_on_changed(sender, instance=None, **kwargs):
     if not instance:
         return
-
     setting_pub_sub.publish(instance.name)
-
-    # 配置变化: PERM_SINGLE_ASSET_TO_UNGROUP_NODE
-    if instance.name == 'PERM_SINGLE_ASSET_TO_UNGROUP_NODE':
-        # 清除所有用户授权树已构建的标记，下次访问重新生成
-        logger.debug('Clean ALL User perm tree built mark')
-        from perms.utils.asset import UserGrantedTreeRefreshController
-        UserGrantedTreeRefreshController.clean_all_user_tree_built_mark()
 
 
 @receiver(django_ready)
@@ -64,29 +55,32 @@ def auto_generate_terminal_host_key(sender, **kwargs):
         pass
 
 
-@receiver(pre_save, dispatch_uid="my_unique_identifier")
-def on_create_set_created_by(sender, instance=None, **kwargs):
-    if getattr(instance, '_ignore_auto_created_by', False) is True:
-        return
-    if not hasattr(instance, 'created_by') or instance.created_by:
-        return
-    if current_request and current_request.user.is_authenticated:
-        user_name = current_request.user.name
-        if isinstance(user_name, str):
-            user_name = user_name[:30]
-        instance.created_by = user_name
-
-
 @receiver(django_ready)
 def subscribe_settings_change(sender, **kwargs):
     logger.debug("Start subscribe setting change")
 
-    def keep_subscribe_settings_change():
-        setting_pub_sub.subscribe(lambda name: Setting.refresh_item(name))
+    setting_pub_sub.subscribe(lambda name: Setting.refresh_item(name))
 
-    t = threading.Thread(target=keep_subscribe_settings_change)
-    t.daemon = True
-    t.start()
+
+def update_site_url():
+    site_url = Setting.objects.filter(name='SITE_URL').first()
+    host_ip = os.environ.get('HOST_IP')
+    if not host_ip:
+        return
+    scheme = 'https' if os.environ.get('HTTPS_PORT') else 'http'
+    if not site_url:
+        site_url = Setting.objects.create(name='SITE_URL')
+
+    if site_url.cleaned_value == f'http://127.0.0.1' or not site_url.cleaned_value:
+        site_url.cleaned_value = f'{scheme}://{host_ip}'
+        site_url.save()
+
+
+@receiver(post_migrate)
+def after_migrate_some_config(sender, app_config, **kwargs):
+    last_app = list(apps.get_app_configs())[-1]
+    if app_config.name == last_app.name:
+        update_site_url()
 
 
 @receiver(django_ready)
@@ -102,3 +96,36 @@ def monkey_patch_settings(sender, **kwargs):
         LazySettings.__getattr__ = monkey_patch_getattr
     except (ProgrammingError, OperationalError):
         pass
+
+
+@receiver(post_migrate, dispatch_uid='settings.signal_handlers.init_sqlite_db')
+def init_sqlite_db(sender, app_config, **kwargs):
+    if app_config.name != 'settings':
+         return
+    db_path = settings.LEAK_PASSWORD_DB_PATH
+    if not os.path.isfile(db_path):
+        # 这里处理一下历史数据，有可能用户 copy 了旧的文件到 目录下
+        src = os.path.join(settings.PROJECT_DIR, 'data', 'leak_passwords.db')
+        if not os.path.isfile(src):
+            src = os.path.join(
+                settings.APPS_DIR, 'accounts', 'automations',
+                'check_account', 'leak_passwords.db'
+            )
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        shutil.copy(src, db_path)
+    logger.info(f'init sqlite db {db_path}')
+    return db_path
+
+
+@receiver(django_ready)
+def register_sqlite_connection(sender, **kwargs):
+    connections.databases['sqlite'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'ATOMIC_REQUESTS': False,
+        'NAME': settings.LEAK_PASSWORD_DB_PATH,
+        'TIME_ZONE': None,
+        'CONN_HEALTH_CHECKS': False,
+        'CONN_MAX_AGE': 0,
+        'OPTIONS': {},
+        'AUTOCOMMIT': True,
+    }

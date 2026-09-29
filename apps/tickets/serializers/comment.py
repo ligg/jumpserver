@@ -1,18 +1,19 @@
 from rest_framework import serializers
+
+from common.serializers.fields import ReadableHiddenField
 from ..models import Comment
-from common.drf.fields import ReadableHiddenField
 
 __all__ = ['CommentSerializer']
 
 
-class CurrentTicket(object):
-    ticket = None
+class CurrentTicket:
+    requires_context = True
 
-    def set_context(self, serializer_field):
-        self.ticket = serializer_field.context['ticket']
+    def __call__(self, serializer_field):
+        return serializer_field.context['ticket']
 
-    def __call__(self):
-        return self.ticket
+    def __repr__(self):
+        return '%s()' % self.__class__.__name__
 
 
 class CommentSerializer(serializers.ModelSerializer):
@@ -23,8 +24,7 @@ class CommentSerializer(serializers.ModelSerializer):
         model = Comment
         fields_mini = ['id']
         fields_small = fields_mini + [
-            'body',  'user_display',
-            'date_created', 'date_updated'
+            'body', 'user_display', 'date_created', 'date_updated'
         ]
         fields_fk = ['ticket', 'user', ]
         fields = fields_small + fields_fk

@@ -12,7 +12,6 @@ from django.urls import path
 
 from . import views
 
-
 urlpatterns = [
     path('login/', views.OIDCAuthRequestView.as_view(), name='login'),
     path('callback/', views.OIDCAuthCallbackView.as_view(), name='login-callback'),

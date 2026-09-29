@@ -1,0 +1,26 @@
+- hosts: mongodb
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ local_python_interpreter }}"
+
+  tasks:
+    - name: Get info
+      mongodb_ping:
+        login_user: "{{ jms_account.username }}"
+        login_password: "{{ jms_account.secret }}"
+        login_host: "{{ jms_asset.address }}"
+        login_port: "{{ jms_asset.port }}"
+        login_database: "{{ jms_asset.mongodb_auth_source }}"
+        ssl: "{{ jms_asset.spec_info.use_ssl }}"
+        ssl_ca_certs: "{{ jms_asset.secret_info.ca_cert | default('') }}"
+        ssl_certfile: >-
+          {{ jms_asset.secret_info.client_cert_key
+             | default(jms_asset.secret_info.client_key | default('')) }}
+        connection_options: "{{ jms_asset.mongodb_connection_options }}"
+        gather_version: true
+      register: db_info
+
+    - name: Define info by set_fact
+      set_fact:
+        info:
+          version: "{{ db_info.server_version }}"

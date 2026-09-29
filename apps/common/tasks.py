@@ -1,15 +1,43 @@
 import os
 
-from django.core.mail import send_mail, EmailMultiAlternatives
-from django.conf import settings
 from celery import shared_task
+from django.conf import settings
+from django.core.mail import send_mail, EmailMultiAlternatives, get_connection
+from django.utils.translation import gettext_lazy as _
 
+from common.storage import jms_storage
+from common.utils import text_hmac_sha256
+from users.models import User
 from .utils import get_logger
 
 logger = get_logger(__file__)
 
 
-@shared_task
+def get_email_connection(**kwargs):
+    email_backend_map = {
+        'smtp': 'jumpserver.rewriting.smtp.EmailBackend',
+        'exchange': 'jumpserver.rewriting.exchange.EmailBackend'
+    }
+    return get_connection(
+        backend=email_backend_map.get(settings.EMAIL_PROTOCOL), **kwargs
+    )
+
+
+def task_activity_callback(self, subject, message, recipient_list, *args, **kwargs):
+    from users.models import User
+    email_list = recipient_list
+    email_lookup_list = [text_hmac_sha256(email) for email in email_list]
+    resource_ids = list(User.objects.filter(email_lookup__in=email_lookup_list).values_list('id', flat=True))
+    return resource_ids,
+
+
+@shared_task(
+    verbose_name=_("Send email"),
+    activity_callback=task_activity_callback,
+    description=_(
+        "This task will be executed when sending email notifications"
+    )
+)
 def send_mail_async(*args, **kwargs):
     """ Using celery to send email async
 
@@ -18,29 +46,57 @@ def send_mail_async(*args, **kwargs):
     Example:
     send_mail_sync.delay(subject, message, from_mail, recipient_list, fail_silently=False, html_message=None)
 
-    Also you can ignore the from_mail, unlike django send_mail, from_email is not a require args:
+    Also, you can ignore the from_mail, unlike django send_mail, from_email is not a required args:
 
     Example:
     send_mail_sync.delay(subject, message, recipient_list, fail_silently=False, html_message=None)
     """
+    from users.utils import activate_user_language
+
     if len(args) == 3:
         args = list(args)
         args[0] = (settings.EMAIL_SUBJECT_PREFIX or '') + args[0]
         from_email = settings.EMAIL_FROM or settings.EMAIL_HOST_USER
         args.insert(2, from_email)
-        args = tuple(args)
 
-    try:
-        return send_mail(*args, **kwargs)
-    except Exception as e:
-        logger.error("Sending mail error: {}".format(e))
+    args = tuple(args)
+
+    subject = args[0] if len(args) > 0 else kwargs.get('subject')
+    recipient_list = args[3] if len(args) > 3 else kwargs.get('recipient_list')
+    logger.info(
+        _(
+            "Sending email: subject=%(subject)r, "
+            "recipients=%(recipients)r"
+        ),
+        {
+            'subject': subject,
+            'recipients': recipient_list,
+        },
+    )
+
+    email_lookup_list = [text_hmac_sha256(email) for email in recipient_list]
+    users = User.objects.filter(email_lookup__in=email_lookup_list).all()
+    for user in users:
+        try:
+            with activate_user_language(user):
+                send_mail(connection=get_email_connection(), *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Sending mail to {user.email} error: {e}")
 
 
-@shared_task
+@shared_task(
+    verbose_name=_("Send email attachment"),
+    activity_callback=task_activity_callback,
+    description=_(
+        """When an account password is changed or an account backup generates attachments, 
+        this task needs to be executed for sending emails and handling attachments"""
+    )
+)
 def send_mail_attachment_async(subject, message, recipient_list, attachment_list=None):
     if attachment_list is None:
         attachment_list = []
     from_email = settings.EMAIL_FROM or settings.EMAIL_HOST_USER
+    subject = (settings.EMAIL_SUBJECT_PREFIX or '') + subject
     email = EmailMultiAlternatives(
         subject=subject,
         body=message,
@@ -49,8 +105,26 @@ def send_mail_attachment_async(subject, message, recipient_list, attachment_list
     )
     for attachment in attachment_list:
         email.attach_file(attachment)
+    email.send()
+    for attachment in attachment_list:
         os.remove(attachment)
+
+
+@shared_task(
+    verbose_name=_('Upload account backup to external storage'),
+    description=_(
+        "When performing an account backup, this task needs to be executed to external storage (SFTP)"
+    )
+)
+def upload_backup_to_obj_storage(recipient, upload_file):
+    logger.info(f'Start upload file : {upload_file}')
+    remote_path = os.path.join('account_backup', os.path.basename(upload_file))
+    storage = jms_storage.get_object_storage(recipient.config)
+    ok, err = storage.upload(src=upload_file, target=remote_path)
+    if not ok:
+        logger.error(f'upload {upload_file} failed, error: {err}')
+        return
     try:
-        return email.send()
+        os.remove(upload_file)
     except Exception as e:
-        logger.error("Sending mail attachment error: {}".format(e))
+        print(f'remove upload file : {upload_file} error: {e}')

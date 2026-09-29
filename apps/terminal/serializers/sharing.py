@@ -1,8 +1,11 @@
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
-from django.utils.translation import ugettext_lazy as _
-from orgs.mixins.serializers import OrgResourceModelSerializerMixin
-from common.utils.random import random_string
+
+from common.serializers.fields import LabeledChoiceField
 from common.utils.common import pretty_string
+from common.utils.random import random_string
+from orgs.mixins.serializers import OrgResourceModelSerializerMixin
+from ..const import ActionPermission, TerminalType
 from ..models import SessionSharing, SessionJoinRecord
 
 __all__ = ['SessionSharingSerializer', 'SessionJoinRecordSerializer']
@@ -12,13 +15,18 @@ class SessionSharingSerializer(OrgResourceModelSerializerMixin):
     users = serializers.ListSerializer(
         child=serializers.CharField(max_length=36), allow_null=True, write_only=True
     )
+    action_permission = LabeledChoiceField(
+        default=ActionPermission.writable, choices=ActionPermission.choices,
+        write_only=True, label=_('Action permission')
+    )
 
     class Meta:
         model = SessionSharing
         fields_mini = ['id']
         fields_small = fields_mini + [
             'verify_code', 'is_active', 'expired_time', 'created_by',
-            'date_created', 'date_updated', 'users', 'users_display'
+            'date_created', 'date_updated', 'users', 'users_display',
+            'action_permission', 'origin', 'url',
         ]
         fields_fk = ['session', 'creator']
         fields = fields_small + fields_fk
@@ -30,6 +38,12 @@ class SessionSharingSerializer(OrgResourceModelSerializerMixin):
         return super().save(**kwargs)
 
     def create(self, validated_data):
+        request = self.context.get('request')
+        if request and 'X-JMS-SHARE-COMPONENT' in request.headers:
+            component = serializers.ChoiceField(choices=(TerminalType.koko, TerminalType.lion))
+            validated_data['share_component'] = component.run_validation(
+                request.headers['X-JMS-SHARE-COMPONENT']
+            )
         validated_data['verify_code'] = random_string(4)
         session = validated_data.get('session')
         if session:
@@ -40,13 +54,17 @@ class SessionSharingSerializer(OrgResourceModelSerializerMixin):
 
 
 class SessionJoinRecordSerializer(OrgResourceModelSerializerMixin):
+    action_permission = LabeledChoiceField(
+        choices=ActionPermission.choices, read_only=True, label=_('Action permission')
+    )
+
     class Meta:
         model = SessionJoinRecord
         fields_mini = ['id']
         fields_small = fields_mini + [
             'joiner_display', 'verify_code', 'date_joined', 'date_left',
             'remote_addr', 'login_from', 'is_success', 'reason', 'is_finished',
-            'created_by', 'date_created', 'date_updated'
+            'created_by', 'date_created', 'date_updated', 'action_permission'
         ]
         fields_fk = ['session', 'sharing', 'joiner']
         fields = fields_small + fields_fk

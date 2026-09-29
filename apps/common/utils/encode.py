@@ -1,24 +1,23 @@
 # -*- coding: utf-8 -*-
 #
-import re
-import json
-from six import string_types
 import base64
-import os
-import time
 import hashlib
+import json
+import os
+import re
+import time
 from io import StringIO
-from itertools import chain
 
 import paramiko
 import sshpubkeys
+from cryptography.hazmat.primitives import serialization
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from itsdangerous import (
     TimedJSONWebSignatureSerializer, JSONWebSignatureSerializer,
     BadSignature, SignatureExpired
 )
-from django.conf import settings
-from django.core.serializers.json import DjangoJSONEncoder
-from django.db.models.fields.files import FileField
+from six import string_types
 
 from .http import http_date
 
@@ -69,22 +68,23 @@ class Signer(metaclass=Singleton):
             return None
 
 
+_supported_paramiko_ssh_key_types = (
+    paramiko.RSAKey,
+    paramiko.DSSKey,
+    paramiko.Ed25519Key,
+    paramiko.ECDSAKey,)
+
+
 def ssh_key_string_to_obj(text, password=None):
     key = None
-    try:
-        key = paramiko.RSAKey.from_private_key(StringIO(text), password=password)
-    except paramiko.SSHException:
-        pass
-    else:
-        return key
-
-    try:
-        key = paramiko.DSSKey.from_private_key(StringIO(text), password=password)
-    except paramiko.SSHException:
-        pass
-    else:
-        return key
-
+    for ssh_key_type in _supported_paramiko_ssh_key_types:
+        try:
+            key = ssh_key_type.from_private_key(StringIO(text), password=password)
+            return key
+        except paramiko.SSHException:
+            pass
+    if key is None:
+        raise ValueError('Invalid private key')
     return key
 
 
@@ -98,7 +98,7 @@ def ssh_private_key_gen(private_key, password=None):
 
 def ssh_pubkey_gen(private_key=None, username='jumpserver', hostname='localhost', password=None):
     private_key = ssh_private_key_gen(private_key, password=password)
-    if not isinstance(private_key, (paramiko.RSAKey, paramiko.DSSKey)):
+    if not isinstance(private_key, _supported_paramiko_ssh_key_types):
         raise IOError('Invalid private key')
 
     public_key = "%(key_type)s %(key_content)s %(username)s@%(hostname)s" % {
@@ -137,17 +137,67 @@ def ssh_key_gen(length=2048, type='rsa', password=None, username='jumpserver', h
 
 
 def validate_ssh_private_key(text, password=None):
-    if isinstance(text, bytes):
-        try:
-            text = text.decode("utf-8")
-        except UnicodeDecodeError:
-            return False
+    key = parse_ssh_private_key_str(text, password=password)
+    return bool(key)
 
-    key = ssh_key_string_to_obj(text, password=password)
-    if key is None:
-        return False
-    else:
-        return True
+
+def parse_ssh_private_key_str(text: bytes, password=None) -> str:
+    private_key = _parse_ssh_private_key(text, password=password)
+    if private_key is None:
+        return ""
+    # 解析之后，转换成 openssh 格式的私钥
+    private_key_bytes = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption()
+    )
+    return private_key_bytes.decode('utf-8')
+
+
+def parse_ssh_public_key_str(text: bytes = "", password=None) -> str:
+    private_key = _parse_ssh_private_key(text, password=password)
+    if private_key is None:
+        return ""
+    public_key_bytes = private_key.public_key().public_bytes(
+        serialization.Encoding.OpenSSH,
+        serialization.PublicFormat.OpenSSH,
+    )
+    return public_key_bytes.decode('utf-8')
+
+
+def _parse_ssh_private_key(text, password=None):
+    """
+    text: bytes
+    password: str
+    return:private key types:
+                ec.EllipticCurvePrivateKey,
+                rsa.RSAPrivateKey,
+                dsa.DSAPrivateKey,
+                ed25519.Ed25519PrivateKey,
+    """
+    if not bool(password):
+        password = None
+    if isinstance(text, str):
+        try:
+            text = text.encode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    if isinstance(password, str):
+        try:
+            password = password.encode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+    try:
+        if is_openssh_format_key(text):
+            return serialization.load_ssh_private_key(text, password=password)
+        return serialization.load_pem_private_key(text, password=password)
+    except (ValueError, TypeError):
+        return None
+
+
+def is_openssh_format_key(text: bytes):
+    return text.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----")
 
 
 def validate_ssh_public_key(text):
@@ -226,4 +276,4 @@ def ensure_last_char_is_ascii(data):
 def data_to_json(data, sort_keys=True, indent=2, cls=None):
     if cls is None:
         cls = DjangoJSONEncoder
-    return json.dumps(data, sort_keys=sort_keys, indent=indent, cls=cls)
+    return json.dumps(data, ensure_ascii=False, sort_keys=sort_keys, indent=indent, cls=cls)

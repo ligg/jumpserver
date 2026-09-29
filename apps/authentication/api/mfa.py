@@ -1,26 +1,25 @@
 # -*- coding: utf-8 -*-
 #
-import time
-
-from django.utils.translation import ugettext as _
-from django.conf import settings
 from django.shortcuts import get_object_or_404
-from rest_framework.permissions import AllowAny
+from django.utils.translation import gettext as _
+from rest_framework import exceptions
 from rest_framework.generics import CreateAPIView
-from rest_framework.serializers import ValidationError
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.serializers import ValidationError
 
+from common.exceptions import JMSException, UnexpectError
 from common.utils import get_logger
-from common.exceptions import UnexpectError
 from users.models.user import User
-from .. import serializers
 from .. import errors
+from .. import serializers
+from ..errors import SessionEmptyError
 from ..mixins import AuthMixin
 
 logger = get_logger(__name__)
 
 __all__ = [
-    'MFAChallengeVerifyApi', 'MFASendCodeApi'
+    'MFAChallengeVerifyApi', 'MFASendCodeApi',
 ]
 
 
@@ -50,7 +49,10 @@ class MFASendCodeApi(AuthMixin, CreateAPIView):
         mfa_type = serializer.validated_data['type']
 
         if not username:
-            user = self.get_user_from_session()
+            try:
+                user = self.get_user_from_session()
+            except errors.SessionEmptyError as e:
+                raise ValidationError({'error': e})
         else:
             user = self.get_user_from_db(username)
 
@@ -58,8 +60,11 @@ class MFASendCodeApi(AuthMixin, CreateAPIView):
         if not mfa_backend or not mfa_backend.challenge_required:
             error = _('Current user not support mfa type: {}').format(mfa_type)
             raise ValidationError({'error': error})
+
         try:
             mfa_backend.send_challenge()
+        except JMSException:
+            raise
         except Exception as e:
             raise UnexpectError(str(e))
 
@@ -67,6 +72,15 @@ class MFASendCodeApi(AuthMixin, CreateAPIView):
 class MFAChallengeVerifyApi(AuthMixin, CreateAPIView):
     permission_classes = (AllowAny,)
     serializer_class = serializers.MFAChallengeSerializer
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        try:
+            user = self.get_user_from_session()
+        except SessionEmptyError:
+            user = None
+        if not user:
+            raise exceptions.NotAuthenticated()
 
     def perform_create(self, serializer):
         user = self.get_user_from_session()
@@ -80,6 +94,6 @@ class MFAChallengeVerifyApi(AuthMixin, CreateAPIView):
             return Response({'msg': 'ok'})
         except errors.AuthFailedError as e:
             data = {"error": e.error, "msg": e.msg}
-            raise ValidationError(data)
+            return Response(data, status=401)
         except errors.NeedMoreInfoError as e:
             return Response(e.as_data(), status=200)

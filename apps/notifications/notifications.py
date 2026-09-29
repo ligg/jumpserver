@@ -1,21 +1,19 @@
-import traceback
-from html2text import HTML2Text
-from typing import Iterable
-from itertools import chain
 import textwrap
+import traceback
+from itertools import chain
 
 from celery import shared_task
 from django.utils.translation import gettext_lazy as _
 
+from common.utils import lazyproperty, convert_html_to_markdown, convert_html_to_text
 from common.utils.timezone import local_now
-from common.utils import lazyproperty
+from notifications.backends import BACKEND
 from settings.utils import get_login_title
 from users.models import User
-from notifications.backends import BACKEND
+from users.utils import activate_user_language
 from .models import SystemMsgSubscription, UserMsgSubscription
 
 __all__ = ('SystemMessage', 'UserMessage', 'system_msgs', 'Message')
-
 
 system_msgs = []
 user_msgs = []
@@ -44,12 +42,35 @@ class MessageType(type):
         return clz
 
 
-@shared_task
-def publish_task(msg):
-    msg.publish()
+@shared_task(
+    verbose_name=_('Publish the station message'),
+    description=_(
+        """This task needs to be executed for sending internal messages for system alerts, 
+        work orders, and other notifications"""
+    )
+)
+def publish_task(receive_user_ids, backends_msg_mapper):
+    Message.send_msg(receive_user_ids, backends_msg_mapper)
 
 
-class Message(metaclass=MessageType):
+class CustomMsgTemplateBase:
+    _registry = []
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if cls is not CustomMsgTemplateBase and getattr(cls, "template_name", None):
+            CustomMsgTemplateBase._registry.append(cls)
+
+    @classmethod
+    def as_dict(cls):
+        return {
+            "template_name": cls.template_name,
+            "subject": cls.subject,
+            "contexts": cls.contexts,
+        }
+
+
+class Message(CustomMsgTemplateBase, metaclass=MessageType):
     """
     这里封装了什么？
         封装不同消息的模板，提供统一的发送消息的接口
@@ -66,27 +87,35 @@ class Message(metaclass=MessageType):
         return cls.__name__
 
     def publish_async(self):
-        return publish_task.delay(self)
+        self.publish(is_async=True)
 
     @classmethod
     def gen_test_msg(cls):
         raise NotImplementedError
 
-    def publish(self):
+    def publish(self, is_async=False):
         raise NotImplementedError
 
-    def send_msg(self, users: Iterable, backends: Iterable = BACKEND):
+    def get_backend_msg_mapper(self, backends):
         backends = set(backends)
         backends.add(BACKEND.SITE_MSG)  # 站内信必须发
-
+        backends_msg_mapper = {}
         for backend in backends:
+            backend = BACKEND(backend)
+            if not backend.is_enable:
+                continue
+            get_msg_method = getattr(self, f'get_{backend}_msg', self.get_common_msg)
+            msg = get_msg_method()
+            backends_msg_mapper[backend] = msg
+        return backends_msg_mapper
+
+    @staticmethod
+    def send_msg(receive_user_ids, backends_msg_mapper):
+        for backend, msg in backends_msg_mapper.items():
             try:
                 backend = BACKEND(backend)
-                if not backend.is_enable:
-                    continue
-                get_msg_method = getattr(self, f'get_{backend}_msg', self.get_common_msg)
-                msg = get_msg_method()
                 client = backend.client()
+                users = User.objects.filter(id__in=receive_user_ids).all()
                 client.send_msg(users, **msg)
             except NotImplementedError:
                 continue
@@ -115,21 +144,19 @@ class Message(metaclass=MessageType):
     def get_html_msg(self) -> dict:
         return self.get_common_msg()
 
+    @staticmethod
+    def html_to_markdown(html_msg):
+        content = html_msg['message']
+        html_msg['message'] = convert_html_to_markdown(content)
+        return html_msg
+
     def get_markdown_msg(self) -> dict:
-        h = HTML2Text()
-        h.body_width = 300
-        msg = self.get_html_msg()
-        content = msg['message']
-        msg['message'] = h.handle(content)
-        return msg
+        return self.html_to_markdown(self.get_html_msg())
 
     def get_text_msg(self) -> dict:
-        h = HTML2Text()
-        h.body_width = 90
         msg = self.get_html_msg()
         content = msg['message']
-        h.ignore_links = self.text_msg_ignore_links
-        msg['message'] = h.handle(content)
+        msg['message'] = convert_html_to_text(content)
         return msg
 
     @lazyproperty
@@ -195,13 +222,19 @@ class Message(metaclass=MessageType):
         return self.markdown_msg
 
     def get_feishu_msg(self) -> dict:
-        return self.text_msg
+        return self.markdown_msg
+
+    def get_lark_msg(self) -> dict:
+        return self.markdown_msg
 
     def get_email_msg(self) -> dict:
         return self.html_msg_with_sign
 
     def get_site_msg_msg(self) -> dict:
         return self.html_msg
+
+    def get_slack_msg(self) -> dict:
+        return self.markdown_msg
 
     def get_sms_msg(self) -> dict:
         return self.text_msg_with_sign
@@ -233,7 +266,7 @@ class Message(metaclass=MessageType):
 
 
 class SystemMessage(Message):
-    def publish(self):
+    def publish(self, is_async=False):
         subscription = SystemMsgSubscription.objects.get(
             message_type=self.get_message_type()
         )
@@ -246,7 +279,13 @@ class SystemMessage(Message):
             *subscription.users.all(),
             *chain(*[g.users.all() for g in subscription.groups.all()])
         ]
-        self.send_msg(users, receive_backends)
+        for user in users:
+            with activate_user_language(user):
+                backends_msg_mapper = self.get_backend_msg_mapper(receive_backends)
+                if is_async:
+                    publish_task.delay([user.id], backends_msg_mapper)
+                else:
+                    self.send_msg([user.id], backends_msg_mapper)
 
     @classmethod
     def post_insert_to_db(cls, subscription: SystemMsgSubscription):
@@ -263,12 +302,18 @@ class UserMessage(Message):
     def __init__(self, user):
         self.user = user
 
-    def publish(self):
+    def publish(self, is_async=False):
         """
         发送消息到每个用户配置的接收方式上
         """
         sub = UserMsgSubscription.objects.get(user=self.user)
-        self.send_msg([self.user], sub.receive_backends)
+        with activate_user_language(self.user):
+            backends_msg_mapper = self.get_backend_msg_mapper(sub.receive_backends)
+            receive_user_ids = [self.user.id]
+            if is_async:
+                publish_task.delay(receive_user_ids, backends_msg_mapper)
+            else:
+                self.send_msg(receive_user_ids, backends_msg_mapper)
 
     @classmethod
     def get_test_user(cls):

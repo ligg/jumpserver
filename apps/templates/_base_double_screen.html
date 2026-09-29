@@ -11,7 +11,7 @@
 
     {% include '_head_css_js.html' %}
     <link href="{% static "css/jumpserver.css" %}" rel="stylesheet">
-    <script src="{% static "js/jumpserver.js" %}?_=9"></script>
+    <script src="{% static "js/jumpserver.js" %}?v=10"></script>
     <style>
         .outerBox {
             margin: 0 auto;
@@ -22,20 +22,14 @@
 </head>
 
 <body class="gray-bg">
-    <div class="outerBox animated fadeInDown">
-        <div class="row">
-            <div class="col-md-12">
-                    {% block content %} {% endblock %}
-            </div>
-        </div>
-        <hr/>
-        <div class="row">
-            <div class="col-md-12">
-                 {% include '_copyright.html' %}
-            </div>
+<div class="outerBox animated fadeInDown">
+    <div class="row">
+        <div class="col-md-12">
+            {% block content %} {% endblock %}
         </div>
     </div>
+    <hr/>
+</div>
 </body>
-{% include '_foot_js.html' %}
 {% block custom_foot_js %} {% endblock %}
 </html>

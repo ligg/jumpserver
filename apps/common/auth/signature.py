@@ -17,6 +17,7 @@ Reusing failure exceptions serves several purposes:
 
 """
 FAILED = exceptions.AuthenticationFailed('Invalid signature.')
+IP_NOT_ALLOW = exceptions.AuthenticationFailed('Ip is not in access ip list.')
 
 
 class SignatureAuthentication(authentication.BaseAuthentication):
@@ -35,13 +36,19 @@ class SignatureAuthentication(authentication.BaseAuthentication):
     :param www_authenticate_realm:  Default: "api"
     :param required_headers:        Default: ["(request-target)", "date"]
     """
-
+    source = ''
     www_authenticate_realm = "api"
     required_headers = ["(request-target)", "date"]
 
     def fetch_user_data(self, key_id, algorithm=None):
-        """Retuns a tuple (User, secret) or (None, None)."""
+        """Returns a tuple (User, secret) or (None, None)."""
         raise NotImplementedError()
+
+    def is_ip_allow(self, key_id, request):
+        raise NotImplementedError()
+
+    def after_authenticate_update_date(self, user):
+        pass
 
     def authenticate_header(self, request):
         """
@@ -50,7 +57,7 @@ class SignatureAuthentication(authentication.BaseAuthentication):
         """
         h = " ".join(self.required_headers)
         return 'Signature realm="%s",headers="%s"' % (
-        self.www_authenticate_realm, h)
+            self.www_authenticate_realm, h)
 
     def authenticate(self, request):
         """
@@ -64,10 +71,16 @@ class SignatureAuthentication(authentication.BaseAuthentication):
         if not auth_header or len(auth_header) == 0:
             return None
 
-        method, fields = utils.parse_authorization_header(auth_header)
+        try:
+            method, fields = utils.parse_authorization_header(auth_header)
+        except Exception:
+            raise FAILED from None
 
         # Ignore foreign Authorization headers.
         if method.lower() != 'signature':
+            return None
+
+        if self.source and request.META.get('HTTP_X_SOURCE') != self.source:
             return None
 
         # Verify basic header structure.
@@ -78,35 +91,37 @@ class SignatureAuthentication(authentication.BaseAuthentication):
         if len({"keyid", "algorithm", "signature"} - set(fields.keys())) > 0:
             raise FAILED
 
+        key_id = fields["keyid"]
         # Fetch the secret associated with the keyid
         user, secret = self.fetch_user_data(
-            fields["keyid"],
+            key_id,
             algorithm=fields["algorithm"]
         )
 
         if not (user and secret):
             raise FAILED
 
-        # Gather all request headers and translate them as stated in the Django docs:
-        # https://docs.djangoproject.com/en/1.6/ref/request-response/#django.http.HttpRequest.META
-        headers = {}
-        for key in request.META.keys():
-            if key.startswith("HTTP_") or \
-                    key in ("CONTENT_TYPE", "CONTENT_LENGTH"):
-                header = key[5:].lower().replace('_', '-')
-                headers[header] = request.META[key]
+        if not self.is_ip_allow(key_id, request):
+            raise IP_NOT_ALLOW
+
+        headers = request.headers
 
         # Verify headers
-        hs = HeaderVerifier(
-            headers,
-            secret,
-            required_headers=self.required_headers,
-            method=request.method.lower(),
-            path=request.get_full_path()
-        )
+        try:
+            hs = HeaderVerifier(
+                headers,
+                secret,
+                required_headers=self.required_headers,
+                method=request.method.lower(),
+                path=request.get_full_path()
+            )
+            verified = hs.verify()
+        except Exception:
+            raise FAILED from None
 
         # All of that just to get to this.
-        if not hs.verify():
+        if not verified:
             raise FAILED
 
+        self.after_authenticate_update_date(user)
         return user, fields["keyid"]

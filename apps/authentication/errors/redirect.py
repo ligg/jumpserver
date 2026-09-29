@@ -1,5 +1,5 @@
-from django.utils.translation import ugettext_lazy as _
 from django.urls import reverse
+from django.utils.translation import gettext_lazy as _
 
 from common.exceptions import JMSException
 from . import const
@@ -71,7 +71,7 @@ class LoginConfirmOtherError(LoginConfirmBaseError):
 
     def __init__(self, ticket_id, status, username):
         self.username = username
-        msg = const.login_confirm_error_msg.format(status)
+        msg = const.login_confirm_error_msg.format(status=status)
         super().__init__(ticket_id=ticket_id, msg=msg)
 
     def as_data(self):

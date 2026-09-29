@@ -1,61 +1,98 @@
-from django.views import View
+import uuid
 from django.conf import settings
 from django.contrib import auth
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.http import urlencode
+from django.utils.translation import gettext_lazy as _
+from django.views import View
 
-from authentication.utils import build_absolute_uri
-from common.utils import get_logger
+from authentication.decorators import pre_save_next_to_session, redirect_to_pre_save_next_after_auth
 from authentication.mixins import authenticate
+from authentication.utils import build_absolute_uri
+from authentication.views.mixins import FlashMessageMixin
+from common.utils import get_logger, safe_next_url
 
 logger = get_logger(__file__)
 
 
 class OAuth2AuthRequestView(View):
 
+    @pre_save_next_to_session()
     def get(self, request):
         log_prompt = "Process OAuth2 GET requests: {}"
         logger.debug(log_prompt.format('Start'))
 
+        request_params = request.GET.dict()
+        request_params.pop('next', None)
+        query = urlencode(request_params)
+        redirect_uri = build_absolute_uri(
+            request, path=reverse(settings.AUTH_OAUTH2_AUTH_LOGIN_CALLBACK_URL_NAME)
+        )
+        if query:
+            redirect_uri = f"{redirect_uri}?{query}"
+
         query_dict = {
             'client_id': settings.AUTH_OAUTH2_CLIENT_ID, 'response_type': 'code',
             'scope': settings.AUTH_OAUTH2_SCOPE,
-            'redirect_uri': build_absolute_uri(
-                request, path=reverse(settings.AUTH_OAUTH2_AUTH_LOGIN_CALLBACK_URL_NAME)
-            )
+            'redirect_uri': redirect_uri
         }
 
-        redirect_url = '{url}?{query}'.format(
+        if settings.AUTH_OAUTH2_USE_STATE:
+            state = uuid.uuid4()
+            request.session['oauth2_state'] = state
+            query_dict['state'] = state
+
+        if '?' in settings.AUTH_OAUTH2_PROVIDER_AUTHORIZATION_ENDPOINT:
+            separator = '&'
+        else:
+            separator = '?'
+        redirect_url = '{url}{separator}{query}'.format(
             url=settings.AUTH_OAUTH2_PROVIDER_AUTHORIZATION_ENDPOINT,
+            separator=separator,
             query=urlencode(query_dict)
         )
         logger.debug(log_prompt.format('Redirect login url'))
         return HttpResponseRedirect(redirect_url)
 
 
-class OAuth2AuthCallbackView(View):
+class OAuth2AuthCallbackView(View, FlashMessageMixin):
     http_method_names = ['get', ]
 
+    @redirect_to_pre_save_next_after_auth
     def get(self, request):
         """ Processes GET requests. """
         log_prompt = "Process GET requests [OAuth2AuthCallbackView]: {}"
         logger.debug(log_prompt.format('Start'))
         callback_params = request.GET
 
+        state = None
+        if settings.AUTH_OAUTH2_USE_STATE:
+            state = callback_params.get('state')
+            session_state = request.session.get('oauth2_state')
+            if not state or not session_state or session_state != state:
+                logger.error("Invalid state parameter")
+                response = self.get_failed_response('/', title=_('OAuth2 Error'), msg="Invalid state parameter")
+                return response
+            request.session.pop('oauth2_state', None)
+
         if 'code' in callback_params:
             logger.debug(log_prompt.format('Process authenticate'))
-            user = authenticate(code=callback_params['code'], request=request)
-            if user and user.is_valid:
+            user = authenticate(code=callback_params['code'], request=request, state=state)
+
+            if user:
                 logger.debug(log_prompt.format('Login: {}'.format(user)))
                 auth.login(self.request, user)
                 logger.debug(log_prompt.format('Redirect'))
-                return HttpResponseRedirect(
-                    settings.AUTH_OAUTH2_AUTHENTICATION_REDIRECT_URI
-                )
+                return HttpResponseRedirect(settings.AUTH_OAUTH2_AUTHENTICATION_REDIRECT_URI)
+            else:
+                if getattr(request, 'error_message', ''):
+                    response = self.get_failed_response('/', title=_('OAuth2 Error'), msg=request.error_message)
+                    return response
 
         logger.debug(log_prompt.format('Redirect'))
-        return HttpResponseRedirect(settings.AUTH_OAUTH2_AUTHENTICATION_FAILURE_REDIRECT_URI)
+        redirect_url = settings.AUTH_OAUTH2_PROVIDER_END_SESSION_ENDPOINT or '/'
+        return HttpResponseRedirect(redirect_url)
 
 
 class OAuth2EndSessionView(View):
@@ -79,10 +116,10 @@ class OAuth2EndSessionView(View):
             logger.debug(log_prompt.format('Log out the current user: {}'.format(request.user)))
             auth.logout(request)
 
-            if settings.AUTH_OAUTH2_LOGOUT_COMPLETELY:
+            logout_url = settings.AUTH_OAUTH2_PROVIDER_END_SESSION_ENDPOINT
+            if settings.AUTH_OAUTH2_LOGOUT_COMPLETELY and logout_url:
                 logger.debug(log_prompt.format('Log out OAUTH2 platform user session synchronously'))
-                next_url = settings.AUTH_OAUTH2_PROVIDER_END_SESSION_ENDPOINT
-                return HttpResponseRedirect(next_url)
+                return HttpResponseRedirect(logout_url)
 
         logger.debug(log_prompt.format('Redirect'))
         return HttpResponseRedirect(logout_url)

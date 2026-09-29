@@ -1,0 +1,104 @@
+- hosts: demo
+  gather_facts: no
+  tasks:
+    - name: Push user password
+      microsoft.ad.user:
+        identity: "{{ account.username }}"
+        password: "{{ account.secret }}"
+        update_password: always
+        password_never_expires: yes
+        state: present
+        groups:
+          add: "{{ params.groups }}"
+      ignore_errors: true
+      when: account.secret_type == "password"
+      register: change_secret_result
+
+    - name: Refresh connection
+      ansible.builtin.meta: reset_connection
+
+    - name: Verify password through Active Directory
+      ansible.windows.win_powershell:
+        parameters:
+          UserName: "{{ account.username }}"
+        sensitive_parameters:
+          - name: Password
+            value: "{{ account.secret }}"
+        script: |
+          param(
+              [string]$UserName,
+              [securestring]$Password
+          )
+
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+
+          $domain = $env:USERDNSDOMAIN
+          if (-not $domain) {
+              $domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().Name
+          }
+
+          $ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
+              [System.DirectoryServices.AccountManagement.ContextType]::Domain,
+              $domain
+          )
+          try {
+              $principal = [System.DirectoryServices.AccountManagement.UserPrincipal]::FindByIdentity(
+                  $ctx,
+                  $UserName
+              )
+              if (-not $principal) {
+                  throw "AD account not found: $UserName in $domain"
+              }
+
+              try {
+                  $samAccountName = $principal.SamAccountName
+              }
+              finally {
+                  $principal.Dispose()
+              }
+
+              $plainPassword = (New-Object System.Net.NetworkCredential('', $Password)).Password
+              try {
+                  $ok = $ctx.ValidateCredentials($samAccountName, $plainPassword)
+              }
+              finally {
+                  $plainPassword = $null
+              }
+
+              if (-not $ok) {
+                  throw "AD credential verification failed for $UserName in $domain"
+              }
+
+              $Ansible.Result = "verified against $($ctx.ConnectedServer)"
+          }
+          finally {
+              $ctx.Dispose()
+          }
+      when:
+        - account.secret_type == "password"
+        - check_conn_after_change or change_secret_result.failed | default(false)
+      register: verify_ad
+      changed_when: false
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: Mark Windows AD verification as inconclusive
+      ansible.builtin.set_fact:
+        jms_credential_probe:
+          auth_status: unknown
+          reason_code: WINDOWS_AD_VERIFY_FAILED
+          change_succeeded: true
+          sync_candidate: true
+      when:
+        - not (change_secret_result.failed | default(false))
+        - verify_ad.failed | default(false)
+          or verify_ad.unreachable | default(false)
+
+    - name: Fail when Windows AD push and verification both fail
+      ansible.builtin.fail:
+        msg: "Windows AD account push failed: {{ change_secret_result.msg | default('unknown error') }}"
+      when:
+        - change_secret_result.failed | default(false)
+        - verify_ad.failed | default(false)
+          or verify_ad.unreachable | default(false)

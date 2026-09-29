@@ -1,5 +1,4 @@
 .git
-logs/*
 data/*
 .github
 tmp/*
@@ -8,3 +7,7 @@ celerybeat.pid
 ### Vagrant ###
 .vagrant/
 apps/xpack/.git
+.history/
+.idea
+.venv/
+.env

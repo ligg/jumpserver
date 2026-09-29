@@ -1,18 +1,26 @@
 # -*- coding: utf-8 -*-
 #
-from django.templatetags.static import static
+import datetime
+import os
 from django.conf import settings
-from django.utils.translation import ugettext_lazy as _
+from django.templatetags.static import static
+from django.utils.translation import gettext_lazy as _
 
 default_interface = dict((
     ('logo_logout', static('img/logo.png')),
-    ('logo_index', static('img/logo_text.png')),
-    ('login_image', static('img/login_image.jpg')),
+    ('logo_index', static('img/logo_text_white.svg')),
+    ('login_image', static('img/login_image.png')),
+    ('logo_white', static('img/logo_white.png')),
+    ('logo_text_white', static('img/logo_text_white.svg')),
     ('favicon', static('img/facio.ico')),
-    ('login_title', _('JumpServer Open Source Bastion Host')),
+    ('login_title', _('JumpServer - An open-source PAM')),
     ('theme', 'classic_green'),
     ('theme_info', {}),
+    ('footer_content', ''),
+    ('version', os.environ.get("CURRENT_VERSION", ""))
 ))
+
+current_year = datetime.datetime.now().year
 
 default_context = {
     'DEFAULT_PK': '00000000-0000-0000-0000-000000000000',
@@ -20,7 +28,7 @@ default_context = {
     'LOGIN_WECOM_logo_logout': static('img/login_wecom_logo.png'),
     'LOGIN_DINGTALK_logo_logout': static('img/login_dingtalk_logo.png'),
     'LOGIN_FEISHU_logo_logout': static('img/login_feishu_logo.png'),
-    'COPYRIGHT': 'FIT2CLOUD 飞致云' + ' © 2014-2022',
+    'COPYRIGHT': f'{_("FIT2CLOUD")} © 2014-{current_year}',
     'INTERFACE': default_interface,
 }
 
@@ -36,6 +44,3 @@ def jumpserver_processor(request):
         'SECURITY_VIEW_AUTH_NEED_MFA': settings.SECURITY_VIEW_AUTH_NEED_MFA,
     })
     return context
-
-
-

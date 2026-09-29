@@ -1,13 +1,12 @@
 #!/usr/bin/python
-import os
 from typing import Callable
+
+from django.apps import apps
+from django.conf import settings
+from django.db.models import F
+from django.utils.translation import gettext_lazy as _, gettext, get_language
 from treelib import Tree
 from treelib.exceptions import NodeIDAbsentError
-
-from django.utils.translation import gettext_lazy as _, gettext, get_language
-from django.conf import settings
-from django.apps import apps
-from django.db.models import F, Count
 
 from common.tree import TreeNode
 from .models import Permission, ContentType
@@ -23,6 +22,7 @@ root_node_data = {
 # 第二层 view 节点，手动创建的
 view_nodes_data = [
     {'id': 'view_console', 'name': _('Console view')},
+    {'id': 'view_pam', 'name': _('Pam view')},
     {'id': 'view_workbench', 'name': _('Workbench view')},
     {'id': 'view_audit', 'name': _('Audit view')},
     {'id': 'view_setting', 'name': _('System setting')},
@@ -33,81 +33,171 @@ view_nodes_data = [
 app_nodes_data = [
     {'id': 'users', 'view': 'view_console'},
     {'id': 'assets', 'view': 'view_console'},
-    {'id': 'applications', 'view': 'view_console'},
     {'id': 'accounts', 'name': _('Accounts'), 'view': 'view_console'},
     {'id': 'perms', 'view': 'view_console'},
-    {'id': 'acls', 'view': 'view_console'},
-    {'id': 'ops', 'view': 'view_console'},
     {'id': 'terminal', 'name': _('Session audits'), 'view': 'view_audit'},
     {'id': 'audits', 'view': 'view_audit'},
     {'id': 'rbac', 'view': 'view_console'},
     {'id': 'settings', 'view': 'view_setting'},
+    {'id': 'chat_ai', 'name': _('Chat AI'), 'view': 'view_setting'},
     {'id': 'tickets', 'view': 'view_other'},
+    {'id': 'labels', 'view': 'view_console'},
     {'id': 'authentication', 'view': 'view_other'},
+    {'id': 'ops', 'view': 'view_workbench'},
 ]
 
 # 额外其他节点，可以在不同的层次，需要指定父节点，可以将一些 model 归类到这个节点下面
 extra_nodes_data = [
     {"id": "cloud_import", "name": _("Cloud import"), "pId": "assets"},
-    {"id": "backup_account_node", "name": _("Backup account"), "pId": "accounts"},
-    {"id": "gather_account_node", "name": _("Gather account"), "pId": "accounts"},
-    {"id": "app_change_plan_node", "name": _("App change auth"), "pId": "accounts"},
-    {"id": "asset_change_plan_node", "name": _("Asset change auth"), "pId": "accounts"},
-    {"id": "terminal_node", "name": _("Terminal setting"), "pId": "view_setting"},
+    {"id": "account_node", "name": _("Accounts"), "pId": "view_pam"},
+    {"id": "account_risk_node", "name": _("Account risk"), "pId": "view_pam"},
+    {"id": "backup_account_node", "name": _("Backup account"), "pId": "view_pam"},
+    {"id": "gather_account_node", "name": _("Gather account"), "pId": "view_pam"},
+    {"id": "push_account_node", "name": _("Push account"), "pId": "view_pam"},
+    {"id": "account_change_plan_node", "name": _("Account change secret"), "pId": "view_pam"},
     {'id': "my_assets", "name": _("My assets"), "pId": "view_workbench"},
-    {'id': "my_apps", "name": _("My apps"), "pId": "view_workbench"},
+    {'id': "operation_center", "name": _('App ops'), "pId": "view_workbench"},
+    {'id': "notifications", "name": _("Notifications"), "pId": "view_setting"},
+    {'id': "features", "name": _("Feature"), "pId": "view_setting"},
+    {'id': "authentication_setting", "name": _("Authentication"), "pId": "view_setting"},
+    {'id': "storage", "name": _("Storage"), "pId": "view_setting"},
+    {'id': "components", "name": _("Component"), "pId": "view_setting"},
+    {'id': "remote_app", "name": _("Applet"), "pId": "view_setting"},
+    {'id': "security", "name": _("Security"), "pId": "view_setting"},
+    {'id': "appearance", "name": _("Appearance"), "pId": "view_setting"},
+    {'id': "tasks", "name": _("Task"), "pId": "view_setting"},
+    {'id': "license", "name": _("License"), "pId": "view_setting"},
+    {'id': "other", "name": _("Other"), "pId": "view_setting"},
+    {'id': "job_audit", "name": _("Job audit"), "pId": "view_audit"},
+    {'id': "report_node", "name": _("Report"), "pId": "view_audit"},
 ]
 
 # 将 model 放到其它节点下，而不是本来的 app 中
 special_pid_mapper = {
     'common.permission': 'view_other',
-    "assets.authbook": "accounts",
-    "applications.account": "accounts",
-    'xpack.account': 'cloud_import',
+    'acls.commandfilteracl': 'perms',
+    'acls.clipboardacl': 'perms',
+    'acls.commandgroup': 'perms',
+    'acls.loginacl': 'perms',
+    'acls.loginassetacl': 'perms',
+    'acls.connectmethodacl': 'perms',
+    'acls.datamaskingrule': 'perms',
+    'xpack.cloudaccount': 'cloud_import',
     'xpack.syncinstancedetail': 'cloud_import',
     'xpack.syncinstancetask': 'cloud_import',
     'xpack.syncinstancetaskexecution': 'cloud_import',
-    'assets.accountbackupplan': "backup_account_node",
-    'assets.accountbackupplanexecution': "backup_account_node",
-    'xpack.applicationchangeauthplan': 'app_change_plan_node',
-    'xpack.applicationchangeauthplanexecution': 'app_change_plan_node',
-    'xpack.applicationchangeauthplantask': 'app_change_plan_node',
-    'xpack.changeauthplan': 'asset_change_plan_node',
-    'xpack.changeauthplanexecution': 'asset_change_plan_node',
-    'xpack.changeauthplantask': 'asset_change_plan_node',
-    "assets.gathereduser": "gather_account_node",
-    'xpack.gatherusertask': 'gather_account_node',
-    'xpack.gatherusertaskexecution': 'gather_account_node',
-    'orgs.organization': 'view_setting',
-    'settings.setting': 'view_setting',
-    'terminal.terminal': 'terminal_node',
-    'terminal.commandstorage': 'terminal_node',
-    'terminal.replaystorage': 'terminal_node',
-    'terminal.status': 'terminal_node',
-    'terminal.task': 'terminal_node',
-    'terminal.endpoint': 'terminal_node',
-    'terminal.endpointrule': 'terminal_node',
+    'xpack.strategy': 'cloud_import',
+    'xpack.strategyaction': 'cloud_import',
+    'xpack.strategyrule': 'cloud_import',
+    'accounts.account': 'account_node',
+    'accounts.accounttemplate': 'account_node',
+    'accounts.accountrisk': 'account_risk_node',
+    'accounts.checkaccountengine': 'account_risk_node',
+    'accounts.checkaccountautomation': 'account_risk_node',
+    'accounts.checkaccountexecution': 'account_risk_node',
+    'accounts.view_accountsession': 'view_pam',
+    'accounts.view_accountactivity': 'view_pam',
+    'accounts.integrationapplication': 'view_pam',
+    'accounts.virtualaccount': 'view_pam',
+    'accounts.backupaccountautomation': 'backup_account_node',
+    'accounts.view_backupaccountexecution': 'backup_account_node',
+    'accounts.add_backupaccountexecution': 'backup_account_node',
+    "accounts.pushaccountautomation": "push_account_node",
+    "accounts.view_pushaccountexecution": "push_account_node",
+    "accounts.add_pushaccountexecution": "push_account_node",
+    'accounts.view_pushsecretrecord': 'push_account_node',
+    "accounts.gatheredaccount": "gather_account_node",
+    "accounts.gatheraccountsautomation": "gather_account_node",
+    "accounts.view_gatheraccountsexecution": "gather_account_node",
+    "accounts.add_gatheraccountsexecution": "gather_account_node",
+    "accounts.changesecretautomation": "account_change_plan_node",
+    "accounts.view_changesecretexecution": "account_change_plan_node",
+    "accounts.add_changesecretexecution": "account_change_plan_node",
+    "accounts.view_changesecretrecord": "account_change_plan_node",
     'audits.ftplog': 'terminal',
     'perms.view_myassets': 'my_assets',
-    'perms.view_myapps': 'my_apps',
-    'ops.add_commandexecution': 'view_workbench',
-    'ops.view_commandexecution': 'audits',
-    "perms.view_mykubernetsapp": "my_apps",
-    "perms.connect_mykubernetsapp": "my_apps",
-    "perms.view_myremoteapp": "my_apps",
-    "perms.connect_myremoteapp": "my_apps",
-    "perms.view_mydatabaseapp": "my_apps",
-    "perms.connect_mydatabaseapp": "my_apps",
-    "xpack.interface": "view_setting",
-    "settings.change_terminal": "terminal_node",
-    "settings.view_setting": "view_setting",
+    'ops.job': 'operation_center',
+    'ops.adhoc': 'operation_center',
+    'ops.playbook': 'operation_center',
+    'ops.jobexecution': 'operation_center',
     "rbac.view_console": "view_console",
     "rbac.view_audit": "view_audit",
+    "report_node": "view_audit",
+    "rbac.view_pam": "view_pam",
+    'audits.usersession': 'view_audit',
     "rbac.view_workbench": "view_workbench",
     "rbac.view_webterminal": "view_workbench",
     "rbac.view_filemanager": "view_workbench",
-    'tickets.view_ticket': 'tickets'
+    "rbac.view_systemtools": "view_workbench",
+    'tickets.view_ticket': 'tickets',
+    "audits.joblog": "job_audit",
+    'oauth2_provider.accesstoken': 'authentication',
 }
+
+
+if settings.XPACK_ENABLED and settings.JDMC_ENABLED:
+    view_nodes_data.append({'id': 'view_jdmc', 'name': _('JDMC console')})
+    special_pid_mapper["rbac.view_jdmc"] = "view_jdmc"
+
+
+special_setting_pid_mapper = {
+    "rbac.view_userloginreport": "report_node",
+    "rbac.add_userloginreport": "report_node",
+    "rbac.delete_userloginreport": "report_node",
+    "rbac.view_userchangepasswordreport": "report_node",
+    "rbac.add_userchangepasswordreport": "report_node",
+    "rbac.delete_userchangepasswordreport": "report_node",
+    "rbac.view_assetstatisticsreport": "report_node",
+    "rbac.add_assetstatisticsreport": "report_node",
+    "rbac.delete_assetstatisticsreport": "report_node",
+    "rbac.view_assetactivityreport": "report_node",
+    "rbac.add_assetactivityreport": "report_node",
+    "rbac.delete_assetactivityreport": "report_node",
+    "rbac.view_accountstatisticsreport": "report_node",
+    "rbac.add_accountstatisticsreport": "report_node",
+    "rbac.delete_accountstatisticsreport": "report_node",
+    "rbac.view_accountautomationreport": "report_node",
+    "rbac.add_accountautomationreport": "report_node",
+    "rbac.delete_accountautomationreport": "report_node",
+    "settings.change_email": "notifications",
+    "settings.change_sms": "notifications",
+    "settings.change_systemmsgsubscription": "notifications",
+    "settings.change_announcement": "features",
+    "settings.change_ticket": "features",
+    "settings.change_ops": "features",
+    "settings.change_vault": "features",
+    "settings.change_chatai": "features",
+    "settings.change_virtualapp": "features",
+    "settings.change_auth": "authentication_setting",
+    "terminal.replaystorage": "storage",
+    "terminal.commandstorage": "storage",
+    'terminal.applet': 'remote_app',
+    'terminal.applethost': 'remote_app',
+    'terminal.appletpublication': 'remote_app',
+    'terminal.applethostdeployment': 'remote_app',
+    "terminal.virtualapp": "remote_app",
+    "terminal.virtualapppublication": "remote_app",
+    "terminal.appprovider": "remote_app",
+    "settings.change_terminal": "components",
+    "terminal.terminal": "components",
+    "terminal.endpoint": "components",
+    "terminal.endpointrule": "components",
+    "terminal.status": "components",
+    "settings.change_security": "security",
+    "settings.change_interface": "appearance",
+    "terminal.task": "tasks",
+    'ops.celerytask': 'tasks',
+    'ops.view_celerytaskexecution': 'tasks',
+    'ops.view_taskmonitor': 'tasks',
+    "settings.change_clean": "tasks",
+    "settings.change_license": "license",
+    'orgs.organization': 'view_setting',
+    "settings.view_setting": "view_setting",
+    "settings.change_basic": "view_setting",
+    "settings.change_other": "other",
+}
+
+special_pid_mapper.update(special_setting_pid_mapper)
 
 verbose_name_mapper = {
     'orgs.organization': _("App organizations"),
@@ -115,7 +205,10 @@ verbose_name_mapper = {
     'tickets.view_ticket': _("Ticket"),
     'settings.setting': _("Common setting"),
     'rbac.view_permission': _('View permission tree'),
-    'ops.add_commandexecution': _('Execute batch command')
+    'authentication.passkey': _("Passkey"),
+    'oauth2_provider.accesstoken': _("Access token"),
+    'oauth2_provider.view_accesstoken': _("View access token"),
+    'oauth2_provider.delete_accesstoken': _("Revoke access token"),
 }
 
 xpack_nodes = [
@@ -124,7 +217,6 @@ xpack_nodes = [
     "assets.accountbackupplanexecution",
     "rbac.orgrole", "rbac.orgrolebinding",
     'assets.gathereduser',
-
     'settings.change_interface', 'settings.change_sms',
     'users.invite_user', 'users.remove_user',
 ]
@@ -386,7 +478,7 @@ class PermissionTreeUtil:
             'chkDisabled': self.check_disabled,
             'checked': checked,
             'meta': {
-                'type':  tp,
+                'type': tp,
             },
             **data
         }
@@ -394,8 +486,6 @@ class PermissionTreeUtil:
         node = TreeNode(**node_data)
         if settings.DEBUG_DEV:
             node.name += ('[' + node.id + ']')
-        if settings.DEBUG_DEV:
-            node.name += ('-' + node.id)
         return node
 
     def _create_root_tree_node(self):
@@ -445,7 +535,8 @@ class PermissionTreeUtil:
             checked_count, total_count = counter
             if total_count == 0:
                 continue
-            node.name += '({}/{})'.format(checked_count, total_count)
+            if node.isParent:
+                node.name += ' ({}/{})'.format(checked_count, total_count)
             if checked_count != 0:
                 node.checked = True
             nodes.append(node)

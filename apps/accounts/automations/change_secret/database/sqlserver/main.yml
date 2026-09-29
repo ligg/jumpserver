@@ -1,0 +1,102 @@
+- hosts: sqlserver
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ local_python_interpreter }}"
+    target_db: "{{ jms_asset.spec_info.db_name | default('master', true) }}"
+
+  tasks:
+    - name: Change SQLServer password
+      mssql_script:
+        login_user: "{{ jms_account.username }}"
+        login_password: "{{ jms_account.secret }}"
+        login_host: "{{ jms_asset.address }}"
+        login_port: "{{ jms_asset.port }}"
+        name: "{{ target_db }}"
+        encryption: "{{ jms_asset.encryption | default(None) }}"
+        tds_version: "{{ jms_asset.tds_version | default(None) }}"
+        login_timeout: 15
+        query_timeout: 30
+        transaction: true
+        script: |
+          DECLARE @login_name nvarchar(256) = %(username)s;
+          DECLARE @password nvarchar(4000) = %(password)s;
+          DECLARE @db_name nvarchar(256) = %(db_name)s;
+          DECLARE @sql nvarchar(max);
+
+          IF @login_name IS NULL OR LEN(@login_name) = 0 OR LEN(@login_name) > 128
+          BEGIN
+              RAISERROR('Invalid login name', 16, 1);
+              RETURN;
+          END;
+
+          IF @db_name IS NULL OR LEN(@db_name) = 0 OR LEN(@db_name) > 128 OR DB_ID(@db_name) IS NULL
+          BEGIN
+              RAISERROR('Invalid default database', 16, 1);
+              RETURN;
+          END;
+
+          IF EXISTS (SELECT 1 FROM sys.sql_logins WHERE name = @login_name)
+          BEGIN
+              SET @sql = N'ALTER LOGIN ' + QUOTENAME(@login_name)
+                       + N' WITH PASSWORD = N''' + REPLACE(@password, N'''', N'''''') + N''', DEFAULT_DATABASE = '
+                       + QUOTENAME(@db_name) + N';';
+              EXEC sys.sp_executesql @sql;
+          END
+          ELSE
+          BEGIN
+              SET @sql = N'CREATE LOGIN ' + QUOTENAME(@login_name)
+                       + N' WITH PASSWORD = N''' + REPLACE(@password, N'''', N'''''') + N''', DEFAULT_DATABASE = '
+                       + QUOTENAME(@db_name) + N';';
+              EXEC sys.sp_executesql @sql;
+
+          END;
+
+          IF USER_ID(@login_name) IS NULL
+          BEGIN
+              SET @sql = N'CREATE USER ' + QUOTENAME(@login_name)
+                       + N' FOR LOGIN ' + QUOTENAME(@login_name) + N';';
+              EXEC sys.sp_executesql @sql;
+          END;
+
+          SELECT 1 AS ok;
+        params:
+          username: "{{ account.username }}"
+          password: "{{ account.secret }}"
+          db_name: "{{ target_db }}"
+      ignore_errors: true
+      register: change_secret_result
+
+    - name: Verify password
+      mssql_script:
+        login_user: "{{ account.username }}"
+        login_password: "{{ account.secret }}"
+        login_host: "{{ jms_asset.address }}"
+        login_port: "{{ jms_asset.port }}"
+        name: "{{ target_db }}"
+        encryption: "{{ jms_asset.encryption | default(None) }}"
+        tds_version: "{{ jms_asset.tds_version | default(None) }}"
+        login_timeout: 15
+        query_timeout: 30
+        script: |
+          SELECT 1
+        changed: false
+      when: check_conn_after_change or change_secret_result.failed | default(false)
+      register: verify_secret_result
+      ignore_errors: true
+
+    - name: Mark SQLServer verification as inconclusive
+      ansible.builtin.set_fact:
+        jms_credential_probe:
+          auth_status: unknown
+          reason_code: SQLSERVER_VERIFY_FAILED
+          change_succeeded: true
+      when:
+        - not (change_secret_result.failed | default(false))
+        - verify_secret_result.failed | default(false)
+
+    - name: Fail when SQLServer change and verification both fail
+      ansible.builtin.fail:
+        msg: "SQLServer password change failed: {{ change_secret_result.msg | default('unknown error') }}"
+      when:
+        - change_secret_result.failed | default(false)
+        - verify_secret_result.failed | default(false)

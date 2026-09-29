@@ -1,20 +1,23 @@
-import time
-import hmac
 import base64
+import hashlib
+import hmac
+import time
 
-from common.utils import get_logger
-from common.sdk.im.utils import digest, as_request
+from django.conf import settings
+
 from common.sdk.im.mixin import BaseRequest
+from common.sdk.im.utils import digest, as_request
+from common.utils import get_logger
+from users.utils import construct_user_email, flatten_dict, map_attributes
 
 logger = get_logger(__file__)
 
 
 def sign(secret, data):
-
     digest = hmac.HMAC(
         key=secret.encode('utf8'),
         msg=data.encode('utf8'),
-        digestmod=hmac._hashlib.sha256
+        digestmod=hashlib.sha256
     ).digest()
     signature = base64.standard_b64encode(digest).decode('utf8')
     # signature = urllib.parse.quote(signature, safe='')
@@ -27,14 +30,17 @@ class ErrorCode:
 
 
 class URL:
-    QR_CONNECT = 'https://oapi.dingtalk.com/connect/qrconnect'
+    QR_CONNECT = 'https://login.dingtalk.com/oauth2/auth'
     OAUTH_CONNECT = 'https://oapi.dingtalk.com/connect/oauth2/sns_authorize'
-    GET_USER_INFO_BY_CODE = 'https://oapi.dingtalk.com/sns/getuserinfo_bycode'
+    GET_USER_ACCESSTOKEN = 'https://api.dingtalk.com/v1.0/oauth2/userAccessToken'
+    GET_USER_INFO = 'https://api.dingtalk.com/v1.0/contact/users/me'
+    GET_USERINFO_BYCODE = "https://oapi.dingtalk.com/sns/getuserinfo_bycode"
     GET_TOKEN = 'https://oapi.dingtalk.com/gettoken'
     SEND_MESSAGE_BY_TEMPLATE = 'https://oapi.dingtalk.com/topapi/message/corpconversation/sendbytemplate'
     SEND_MESSAGE = 'https://oapi.dingtalk.com/topapi/message/corpconversation/asyncsend_v2'
     GET_SEND_MSG_PROGRESS = 'https://oapi.dingtalk.com/topapi/message/corpconversation/getsendprogress'
     GET_USERID_BY_UNIONID = 'https://oapi.dingtalk.com/topapi/user/getbyunionid'
+    GET_USER_INFO_BY_USER_ID = 'https://oapi.dingtalk.com/topapi/v2/user/get'
 
 
 class DingTalkRequests(BaseRequest):
@@ -70,8 +76,9 @@ class DingTalkRequests(BaseRequest):
     def get(self, url, params=None,
             with_token=False, with_sign=False,
             check_errcode_is_0=True,
-            **kwargs):
+            **kwargs) -> dict:
         pass
+
     get = as_request(get)
 
     def post(self, url, json=None, params=None,
@@ -79,6 +86,7 @@ class DingTalkRequests(BaseRequest):
              check_errcode_is_0=True,
              **kwargs) -> dict:
         pass
+
     post = as_request(post)
 
     def _add_sign(self, kwargs: dict):
@@ -110,6 +118,7 @@ class DingTalkRequests(BaseRequest):
 
 
 class DingTalk:
+
     def __init__(self, appid, appsecret, agentid, timeout=None):
         self._appid = appid or ''
         self._appsecret = appsecret or ''
@@ -120,20 +129,37 @@ class DingTalk:
             timeout=timeout
         )
 
+    @property
+    def attributes(self):
+        return settings.DINGTALK_RENAME_ATTRIBUTES
+
     def get_userinfo_bycode(self, code):
-        # https://developers.dingtalk.com/document/app/obtain-the-user-information-based-on-the-sns-temporary-authorization?spm=ding_open_doc.document.0.0.3a256573y8Y7yg#topic-1995619
         body = {
-            "tmp_auth_code": code
+            'clientId': self._appid,
+            'clientSecret': self._appsecret,
+            'code': code,
+            'grantType': 'authorization_code'
         }
+        data = self._request.post(URL.GET_USER_ACCESSTOKEN, json=body, check_errcode_is_0=False)
+        token = data['accessToken']
 
-        data = self._request.post(URL.GET_USER_INFO_BY_CODE, json=body, with_sign=True)
-        return data['user_info']
+        user = self._request.get(URL.GET_USER_INFO,
+                                 headers={'x-acs-dingtalk-access-token': token}, check_errcode_is_0=False)
+        return user
 
-    def get_userid_by_code(self, code):
-        user_info = self.get_userinfo_bycode(code)
-        unionid = user_info['unionid']
+    def get_user_id_by_code_for_oauth(self, code):
+        # https://open.dingtalk.com/document/orgapp/use-a-dingtalk-account-to-log-on-to-a-third-party
+        user = self._request.post(URL.GET_USERINFO_BYCODE, json={"tmp_auth_code": code},
+                                  check_errcode_is_0=False, with_sign=True)
+        unionid = user["user_info"]['unionid']
         userid = self.get_userid_by_unionid(unionid)
-        return userid
+        return userid, None
+
+    def get_user_id_by_code(self, code):
+        user_info = self.get_userinfo_bycode(code)
+        unionid = user_info['unionId']
+        userid = self.get_userid_by_unionid(unionid)
+        return userid, None
 
     def get_userid_by_unionid(self, unionid):
         body = {
@@ -195,3 +221,25 @@ class DingTalk:
 
         data = self._request.post(URL.GET_SEND_MSG_PROGRESS, json=body, with_token=True)
         return data
+
+    @staticmethod
+    def default_user_detail(data, user_id):
+        username = data.get('userid', user_id)
+        name = data.get('name', username)
+        email = data.get('email') or data.get('org_email')
+        email = construct_user_email(username, email)
+        return {
+            'username': username, 'name': name, 'email': email
+        }
+
+    def get_user_detail(self, user_id, **kwargs):
+        # https://open.dingtalk.com/document/orgapp/query-user-details
+        data = self._request.post(
+            URL.GET_USER_INFO_BY_USER_ID, json={'userid': user_id}, with_token=True
+        )
+        data = data['result']
+        data['user_id'] = user_id
+        info = flatten_dict(data)
+        default_detail = self.default_user_detail(data, user_id)
+        detail = map_attributes(default_detail, info, self.attributes)
+        return detail

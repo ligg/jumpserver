@@ -1,0 +1,120 @@
+# -*- coding: utf-8 -*-
+#
+import logging
+
+from django.core.cache import cache
+from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
+from django_filters import rest_framework as filters
+from rest_framework import generics
+from rest_framework import status
+from rest_framework.views import APIView, Response
+
+from common.api import JMSBulkModelViewSet
+from common.drf.filters import BaseFilterSet
+from common.exceptions import JMSException
+from common.permissions import WithBootstrapToken, IsServiceAccount
+from jumpserver.conf import ConfigCrypto
+from terminal import serializers
+from terminal.models import Terminal
+
+__all__ = [
+    'TerminalViewSet', 'TerminalConfig',
+    'TerminalRegistrationApi', 'EncryptedTerminalConfig'
+]
+logger = logging.getLogger(__file__)
+
+
+class TerminalFilterSet(BaseFilterSet):
+    name = filters.CharFilter(
+        field_name='name', lookup_expr='icontains', label=_('Name')
+    )
+    remote_addr = filters.CharFilter(
+        field_name='remote_addr', lookup_expr='icontains',
+        label=_('Remote address')
+    )
+    is_alive = filters.BooleanFilter(
+        method='filter_is_alive', label=_('Is alive')
+    )
+    load = filters.CharFilter(method='do_nothing', label=_('Load'))
+
+    class Meta:
+        model = Terminal
+        fields = ['name', 'remote_addr', 'type', 'is_alive', 'load']
+
+    def filter_is_alive(self, queryset, name, value):
+        ids = list(queryset.values_list('id', flat=True))
+        if not ids:
+            return queryset.none() if value else queryset
+
+        alive_ids = [pk for pk in ids if cache.get(Terminal.ALIVE_KEY.format(pk))]
+        if value:
+            return queryset.filter(id__in=alive_ids)
+        else:
+            return queryset.exclude(id__in=alive_ids)
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        search = self.request.query_params.get('search')
+        if not search:
+            return queryset
+        q = Q(name__icontains=search) | Q(remote_addr__icontains=search)
+        queryset = queryset.filter(q)
+        return queryset
+
+
+class TerminalViewSet(JMSBulkModelViewSet):
+    queryset = Terminal.objects.filter(is_deleted=False)
+    serializer_class = serializers.TerminalSerializer
+    filterset_class = TerminalFilterSet
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.get_online_session_count() > 0:
+            raise JMSException(
+                code='have_online_session',
+                detail=_('Have online sessions')
+            )
+
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        s = self.request.query_params.get('load')
+        if not s:
+            return queryset
+        filtered_queryset_id = [str(q.id) for q in queryset if q.load == s]
+        queryset = queryset.filter(id__in=filtered_queryset_id)
+        return queryset
+
+
+class TerminalConfig(APIView):
+    rbac_perms = {
+        'GET': 'terminal.view_terminalconfig'
+    }
+
+    def get(self, request):
+        config = request.user.terminal.config
+        return Response(config, status=200)
+
+
+class TerminalRegistrationApi(generics.CreateAPIView):
+    serializer_class = serializers.TerminalRegistrationSerializer
+    permission_classes = [WithBootstrapToken]
+    http_method_names = ['post']
+
+
+class EncryptedTerminalConfig(generics.CreateAPIView):
+    serializer_class = serializers.EncryptedConfigSerializer
+    permission_classes = [IsServiceAccount]
+    http_method_names = ['post']
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        encrypt_key = serializer.validated_data['secret_encrypt_key']
+        encrypted_value = serializer.validated_data['encrypted_value']
+        config_crypto = ConfigCrypto(encrypt_key)
+        value = config_crypto.decrypt(encrypted_value)
+        return Response(data={'value': value}, status=200)

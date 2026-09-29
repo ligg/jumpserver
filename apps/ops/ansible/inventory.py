@@ -1,156 +1,529 @@
 # ~*~ coding: utf-8 ~*~
-from ansible.inventory.host import Host
-from ansible.vars.manager import VariableManager
-from ansible.inventory.manager import InventoryManager
-from ansible.parsing.dataloader import DataLoader
+import json
+import os
+import re
+import shlex
+import sys
+from collections import defaultdict
+
+from django.utils.translation import gettext as _
+
+from assets import const
+
+__all__ = ['JMSInventory']
 
 
-__all__ = [
-    'BaseHost', 'BaseInventory'
-]
+def shell_join(args):
+    return ' '.join(shlex.quote(str(arg)) for arg in args)
 
 
-class BaseHost(Host):
-    def __init__(self, host_data):
+def escape_ssh_config_percent(value):
+    return str(value).replace('%', '%%')
+
+
+class JMSInventory:
+    def __init__(
+            self, assets, account_policy='privileged_first',
+            account_prefer='root,Administrator', host_callback=None,
+            exclude_localhost=False, task_type=None, protocol=None,
+            account_selector=None,
+    ):
         """
-        初始化
-        :param host_data:  {
-            "hostname": "",
-            "ip": "",
-            "port": "",
-            # behind is not must be required
-            "username": "",
-            "password": "",
-            "private_key": "",
-            "become": {
-                "method": "",
-                "user": "",
-                "pass": "",
-            }
-            "groups": [],
-            "vars": {},
+        :param assets:
+        :param account_prefer: account username name if not set use account_policy
+        :param account_policy: privileged_only, privileged_first, skip
+        """
+        self.assets = self.clean_assets(assets)
+        self.account_prefer = self.get_account_prefer(account_prefer)
+        self.account_policy = account_policy
+        self.host_callback = host_callback
+        self.exclude_hosts = {}
+        self.exclude_host_details = {}
+        self.exclude_localhost = exclude_localhost
+        self.task_type = task_type
+        self.protocol = protocol
+        self.account_selector = account_selector
+
+    @staticmethod
+    def clean_assets(assets):
+        from assets.models import Asset
+        asset_ids = [asset.id for asset in assets]
+        assets = Asset.objects.filter(id__in=asset_ids, is_active=True) \
+            .prefetch_related('platform', 'zone', 'accounts')
+        return assets
+
+    @staticmethod
+    def get_username(asset, account):
+        if asset.category == const.Category.DS:
+            return account.full_username
+        return account.username
+
+    @staticmethod
+    def group_by_platform(assets):
+        groups = defaultdict(list)
+        for asset in assets:
+            groups[asset.platform].append(asset)
+        return groups
+
+    @staticmethod
+    def get_gateway_ssh_settings(gateway):
+        platform = gateway.platform
+        try:
+            protocol = platform.protocols.get(name='ssh')
+        except platform.protocols.model.DoesNotExist:
+            return {}
+        return protocol.setting
+
+    def make_proxy_command(self, gateway, path_dir):
+        gateway_target = "{}@{}".format(
+            escape_ssh_config_percent(gateway.username),
+            escape_ssh_config_percent(gateway.address),
+        )
+        proxy_command_args = [
+            "ssh", "-o", "Port={}".format(escape_ssh_config_percent(gateway.port)),
+            "-o", "StrictHostKeyChecking=no",
+        ]
+
+        if gateway.private_key:
+            proxy_command_args.extend([
+                "-i", escape_ssh_config_percent(gateway.get_private_key_path(path_dir))
+            ])
+
+        setting = self.get_gateway_ssh_settings(gateway)
+        if setting.get('nc', False):
+            proxy_command_args.extend(["--", gateway_target, "nc", "-w", "10", "%h", "%p"])
+        else:
+            proxy_command_args.extend(["-W", "%h:%p", "-q", "--", gateway_target])
+
+        if gateway.password:
+            password = escape_ssh_config_percent(gateway.password)
+            proxy_command_args = ["sshpass", "-p", password, *proxy_command_args]
+
+        proxy_command_value = "ProxyCommand=" + shell_join(proxy_command_args)
+        return {"ansible_ssh_common_args": "-o " + shlex.quote(proxy_command_value)}
+
+    def make_account_ansible_vars(self, asset, account, path_dir):
+        username = self.get_username(asset, account)
+        var = {
+            'ansible_user': username,
         }
-        """
-        self.host_data = host_data
-        hostname = host_data.get('hostname') or host_data.get('ip')
-        port = host_data.get('port') or 22
-        super().__init__(hostname, port)
-        self.__set_required_variables()
-        self.__set_extra_variables()
+        if not account.secret:
+            return var
 
-    def __set_required_variables(self):
-        host_data = self.host_data
-        self.set_variable('ansible_host', host_data['ip'])
-        self.set_variable('ansible_port', host_data['port'])
+        if account.secret_type == 'password':
+            var['ansible_password'] = account.escape_jinja2_syntax(account.secret)
+        elif account.secret_type == 'ssh_key':
+            var['ansible_ssh_private_key_file'] = account.get_private_key_path(path_dir)
+        return var
 
-        if host_data.get('username'):
-            self.set_variable('ansible_user', host_data['username'])
+    @staticmethod
+    def make_custom_become_ansible_vars(account, su_from_auth, path_dir):
+        # remote_client uses become_* for the initial SSH credential and
+        # login_* for the account reached after su/sudo. This is intentionally
+        # different from Ansible's variable naming.
+        su_method = su_from_auth['ansible_become_method']
+        su_from = account.su_from
+        su_from_password = (
+            account.escape_jinja2_syntax(su_from.secret)
+            if su_from.secret_type == 'password'
+            else None
+        )
+        var = {
+            'jms_custom_become': True,
+            'jms_custom_become_method': su_method,
+            'jms_custom_become_user': su_from.username,
+            'jms_custom_become_password': su_from_password,
+            'jms_custom_become_private_key_path': (
+                su_from.get_private_key_path(path_dir)
+            ),
+        }
+        return var
 
-        # 添加密码和密钥
-        if host_data.get('password'):
-            self.set_variable('ansible_ssh_pass', host_data['password'])
-        if host_data.get('private_key'):
-            self.set_variable('ansible_ssh_private_key_file', host_data['private_key'])
+    @staticmethod
+    def make_protocol_setting_vars(host, protocols):
+        # 针对协议的特殊处理
+        for p in protocols:
+            if p.name == 'ssh':
+                if hasattr(p, 'setting'):
+                    setting = getattr(p, 'setting')
+                    host['jms_asset']['old_ssh_version'] = setting.get('old_ssh_version', False)
+            if p.name == 'sqlserver':
+                if hasattr(p, 'setting'):
+                    setting = getattr(p, 'setting')
+                    encryption = setting.get('encrypt', True)
+                    version = setting.get('version', ">=2014")
+                    if version == '<2014':
+                        host['jms_asset']['tds_version'] = '7.0'
+                    if not encryption:
+                        host['jms_asset']['encryption'] = 'off'
+            if p.name == 'oracle':
+                setting = getattr(p, 'setting', {}) or {}
+                host['jms_asset']['oracle_sysdba'] = setting.get('sysdba', False)
+                host['jms_asset']['oracle_change_secret_with_old_password'] = (
+                    setting.get('change_secret_with_old_password', False)
+                )
+            if p.name == 'mongodb':
+                setting = getattr(p, 'setting', {}) or {}
+                connection_options = {
+                    'serverSelectionTimeoutMS': 15000,
+                    'connectTimeoutMS': 15000,
+                }
+                raw_options = setting.get('connection_options', '') or ''
+                for item in str(raw_options).split('&'):
+                    key, separator, value = item.partition('=')
+                    key = key.strip()
+                    if separator and key:
+                        connection_options[key] = value.strip()
 
-        # 添加become支持
-        become = host_data.get("become", False)
-        if become:
-            self.set_variable("ansible_become", True)
-            self.set_variable("ansible_become_method", become.get('method', 'sudo'))
-            self.set_variable("ansible_become_user", become.get('user', 'root'))
-            self.set_variable("ansible_become_pass", become.get('pass', ''))
+                # Certificate validation is controlled by the asset setting,
+                # not by the free-form connection options.
+                connection_options['tlsAllowInvalidHostnames'] = bool(
+                    host['jms_asset']['spec_info'].get(
+                        'allow_invalid_cert', False
+                    )
+                )
+                auth_source = str(
+                    setting.get('auth_source') or 'admin'
+                ).strip()
+                host['jms_asset']['mongodb_auth_source'] = (
+                    auth_source or 'admin'
+                )
+                host['jms_asset']['mongodb_connection_options'] = [
+                    connection_options
+                ]
+
+    def make_account_vars(self, host, asset, account, automation, protocol, platform, gateway, path_dir,
+                          ansible_config):
+        from accounts.const import AutomationTypes
+        if not account:
+            host['error'] = _("No account available")
+            return host
+
+        port = protocol.port if protocol else 22
+        host['ansible_host'] = asset.address
+        host['ansible_port'] = port
+
+        su_from = account.su_from
+        if platform.su_enabled and su_from:
+            su_from_auth = account.get_ansible_become_auth()
+            host.update(su_from_auth)
+            host.update(self.make_custom_become_ansible_vars(account, su_from_auth, path_dir))
+        elif platform.su_enabled and not su_from and \
+                self.task_type in (AutomationTypes.change_secret, AutomationTypes.push_account):
+            host.update(self.make_account_ansible_vars(asset, account, path_dir))
+            if platform.type not in ["windows", "windows_ad"]:
+                become_method = platform.ansible_become_method
+                login_username = self.get_username(asset, account)
+                is_root = login_username.lower() == 'root'
+
+                if become_method == 'su' and not is_root:
+                    host['error'] = _(
+                        "The platform uses su, but the directly connected "
+                        "account does not have a target root credential. "
+                        "Configure su_from or use a root account."
+                    )
+                elif not is_root:
+                    host['ansible_become'] = True
+                    host['ansible_become_method'] = become_method
+                    if become_method == 'sudo':
+                        # sudo authenticates the directly connected account.
+                        host['ansible_become_user'] = 'root'
+                    if account.secret_type == 'password':
+                        host['ansible_become_password'] = (
+                            account.escape_jinja2_syntax(account.secret)
+                        )
         else:
-            self.set_variable("ansible_become", False)
+            host.update(self.make_account_ansible_vars(asset, account, path_dir))
 
-    def __set_extra_variables(self):
-        for k, v in self.host_data.get('vars', {}).items():
-            self.set_variable(k, v)
+        if platform.is_huawei():
+            host['ansible_connection'] = 'network_cli'
+            host['ansible_network_os'] = 'ce'
 
-    def __repr__(self):
-        return self.name
-
-
-class BaseInventory(InventoryManager):
-    """
-    提供生成Ansible inventory对象的方法
-    """
-    loader_class = DataLoader
-    variable_manager_class = VariableManager
-    host_manager_class = BaseHost
-
-    def __init__(self, host_list=None, group_list=None):
-        """
-        用于生成动态构建Ansible Inventory. super().__init__ 会自动调用
-        host_list: [{
-            "hostname": "",
-            "ip": "",
-            "port": "",
-            "username": "",
-            "password": "",
-            "private_key": "",
-            "become": {
-                "method": "",
-                "user": "",
-                "pass": "",
-            },
-            "groups": [],
-            "vars": {},
-          },
-        ]
-        group_list: [
-          {"name: "", children: [""]},
-        ]
-        :param host_list:
-        :param group_list
-        """
-        self.host_list = host_list or []
-        self.group_list = group_list or []
-        assert isinstance(host_list, list)
-        self.loader = self.loader_class()
-        self.variable_manager = self.variable_manager_class()
-        super().__init__(self.loader)
-
-    def get_groups(self):
-        return self._inventory.groups
-
-    def get_group(self, name):
-        return self._inventory.groups.get(name, None)
-
-    def get_or_create_group(self, name):
-        group = self.get_group(name)
-        if not group:
-            self.add_group(name)
-            return self.get_or_create_group(name)
-        else:
-            return group
-
-    def parse_groups(self):
-        for g in self.group_list:
-            parent = self.get_or_create_group(g.get("name"))
-            children = [self.get_or_create_group(n) for n in g.get('children', [])]
-            for child in children:
-                parent.add_child_group(child)
-
-    def parse_hosts(self):
-        group_all = self.get_or_create_group('all')
-        ungrouped = self.get_or_create_group('ungrouped')
-        for host_data in self.host_list:
-            host = self.host_manager_class(host_data=host_data)
-            self.hosts[host_data['hostname']] = host
-            groups_data = host_data.get('groups')
-            if groups_data:
-                for group_name in groups_data:
-                    group = self.get_or_create_group(group_name)
-                    group.add_host(host)
+        if gateway:
+            ansible_connection = host.get('ansible_connection', 'ssh')
+            if ansible_connection in ('local', 'winrm', 'rdp'):
+                host['jms_gateway'] = {
+                    'address': gateway.address, 'port': gateway.port,
+                    'username': gateway.username, 'secret': gateway.password,
+                    'private_key_path': gateway.get_private_key_path(path_dir)
+                }
+                host['jms_asset']['port'] = port
             else:
-                ungrouped.add_host(host)
-            group_all.add_host(host)
+                ansible_ssh_common_args = self.make_proxy_command(gateway, path_dir)
+                host['jms_asset'].update(ansible_ssh_common_args)
+                host.update(ansible_ssh_common_args)
 
-    def parse_sources(self, cache=False):
-        self.parse_groups()
-        self.parse_hosts()
+    def get_primary_protocol(self, ansible_config, protocols):
+        invalid_protocol = type('protocol', (), {'name': 'null', 'port': 0})
+        ansible_connection = ansible_config.get('ansible_connection')
+        # 数值越小，优先级越高，若用户在 ansible_config 中配置了，则提高用户配置方式的优先级
+        protocol_priority = {'ssh': 10, 'winrm': 9, ansible_connection: 1}
+        if self.protocol:
+            protocol_priority.update({self.protocol: 0})
+        protocol_sorted = sorted(protocols, key=lambda x: protocol_priority.get(x.name, 999))
+        protocol = protocol_sorted[0] if protocol_sorted else invalid_protocol
+        return protocol
 
-    def get_matched_hosts(self, pattern):
-        return self.get_hosts(pattern)
+    @staticmethod
+    def fill_ansible_config(ansible_config, protocol):
+        if protocol.name in ('ssh', 'winrm', 'rdp'):
+            ansible_config['ansible_connection'] = protocol.name
+        if protocol.name == 'winrm':
+            if protocol.setting.get('use_ssl', False):
+                ansible_config['ansible_winrm_scheme'] = 'https'
+                ansible_config['ansible_winrm_transport'] = 'ssl'
+                ansible_config['ansible_winrm_server_cert_validation'] = 'ignore'
+            else:
+                ansible_config['ansible_winrm_scheme'] = 'http'
+                ansible_config['ansible_winrm_transport'] = 'ntlm'
+            ansible_config['ansible_winrm_connection_timeout'] = 120
+        return ansible_config
 
+    def asset_to_host(self, asset, account, automation, protocols, platform, path_dir):
+        name = re.sub(r'[ \[\]/]', '_', asset.name)
+        host = {'name': name}
+        if account is None:
+            host['error'] = _('No account available')
+            return host
 
+        try:
+            ansible_config = dict(automation.ansible_config)
+        except (AttributeError, TypeError):
+            ansible_config = {}
+
+        protocol = self.get_primary_protocol(ansible_config, protocols)
+
+        tp, category = asset.type, asset.category
+
+        secret_info = {k: v for k, v in asset.secret_info.items() if v}
+        username = self.get_username(asset, account)
+        host.update({
+            'local_python_interpreter': sys.executable,
+            'jms_asset': {
+                'id': str(asset.id), 'name': asset.name, 'address': asset.address,
+                'type': tp, 'category': category,
+                'protocol': protocol.name, 'port': protocol.port,
+                'spec_info': asset.spec_info, 'secret_info': secret_info,
+                'protocols': [{'name': p.name, 'port': p.port} for p in protocols],
+                'origin_address': asset.address
+            },
+            'jms_account': {
+                'id': str(account.id),
+                'name': account.name,
+                'username': username,
+                'privileged': account.privileged,
+                'secret': account.escape_jinja2_syntax(account.secret),
+                'secret_type': account.secret_type, 'private_key_path': account.get_private_key_path(path_dir)
+            } if account else None
+        })
+
+        self.make_protocol_setting_vars(host, protocols)
+        protocols = host['jms_asset']['protocols']
+        host['jms_asset'].update({f"{p['name']}_port": p['port'] for p in protocols})
+        if host['jms_account'] and tp == 'oracle':
+            use_sysdba = (
+                account.privileged and
+                host['jms_asset'].get('oracle_sysdba', False)
+            )
+            host['jms_account']['mode'] = 'sysdba' if use_sysdba else None
+
+        ansible_config = self.fill_ansible_config(ansible_config, protocol)
+        host.update(ansible_config)
+
+        gateway = None
+        if not asset.is_gateway and asset.zone:
+            gateway = asset.zone.select_gateway()
+
+        self.make_account_vars(
+            host, asset, account, automation, protocol, platform, gateway, path_dir, ansible_config
+        )
+        return host
+
+    @staticmethod
+    def sorted_accounts(accounts):
+        connectivity_score = {'ok': 2, '-': 1, 'err': 0}
+        sort_key = lambda x: (x.privileged, connectivity_score.get(x.connectivity, 0), x.date_updated)
+        accounts_sorted = sorted(accounts, key=sort_key, reverse=True)
+        return accounts_sorted
+
+    def get_asset_sorted_accounts(self, asset):
+        accounts = list(asset.all_accounts.filter(is_active=True))
+        accounts_sorted = self.sorted_accounts(accounts)
+        return accounts_sorted
+
+    @staticmethod
+    def get_account_prefer(account_prefer):
+        account_usernames = []
+        if isinstance(account_prefer, str) and account_prefer:
+            account_usernames = list(map(lambda x: x.lower(), account_prefer.split(',')))
+        return account_usernames
+
+    def get_refer_account(self, accounts):
+        account = None
+        if accounts:
+            account = list(filter(
+                lambda a: a.username.lower() in self.account_prefer, accounts
+            ))
+            account = account[0] if account else None
+        return account
+
+    def select_account(self, asset):
+        if self.account_selector is not None:
+            return self.account_selector(asset)
+        accounts = self.get_asset_sorted_accounts(asset)
+        if not accounts:
+            return None
+
+        refer_account = self.get_refer_account(accounts)
+        if refer_account:
+            return refer_account
+
+        account_selected = accounts[0]
+        if self.account_policy == 'skip':
+            return None
+        elif self.account_policy == 'privileged_first':
+            return account_selected
+        elif self.account_policy == 'privileged_only' and account_selected.privileged:
+            return account_selected
+        else:
+            return None
+
+    @staticmethod
+    def set_platform_protocol_setting_to_asset(asset, platform_protocols):
+        asset_protocols = asset.protocols.all()
+        for p in asset_protocols:
+            setattr(p, 'setting', platform_protocols.get(p.name, {}))
+        return asset_protocols
+
+    def get_classified_hosts(self, path_dir):
+        hosts = []
+        platform_assets = self.group_by_platform(self.assets)
+        runnable_hosts = []
+        error_hosts = []
+
+        for platform, assets in platform_assets.items():
+            automation = platform.automation
+            platform_protocols = {
+                p['name']: p['setting'] for p in platform.protocols.values('name', 'setting')
+            }
+            for asset in assets:
+                protocols = self.set_platform_protocol_setting_to_asset(asset, platform_protocols)
+                account = self.select_account(asset)
+                host = self.asset_to_host(asset, account, automation, protocols, platform, path_dir)
+
+                if not automation.ansible_enabled:
+                    host['error'] = _('Ansible disabled')
+
+                if self.host_callback is not None:
+                    host = self.host_callback(
+                        host, asset=asset, account=account,
+                        platform=platform, automation=automation,
+                        path_dir=path_dir
+                    )
+
+                if (
+                        isinstance(host, dict)
+                        and host.get('error')
+                        and 'jms_asset' not in host
+                ):
+                    host['jms_asset'] = {
+                        'id': str(asset.id),
+                        'name': asset.name,
+                        'address': asset.address,
+                    }
+
+                if isinstance(host, list):
+                    hosts.extend(host)
+                else:
+                    hosts.append(host)
+
+        # 分类主机
+        for host in hosts:
+            if host.get('error'):
+                self.exclude_hosts[host['name']] = host['error']
+                self.exclude_host_details[host['name']] = host
+                error_hosts.append({
+                    'name': host['name'],
+                    'id': host.get('jms_asset', {}).get('id'),
+                    'error': host['error']
+                })
+            else:
+                runnable_hosts.append({
+                    'name': host['name'],
+                    'ip': host.get('ansible_host', ''),
+                    'id': host.get('jms_asset', {}).get('id')
+                })
+        result = {
+            'runnable': runnable_hosts,
+            'error': error_hosts,
+        }
+        return result
+
+    def generate(self, path_dir):
+        hosts = []
+        platform_assets = self.group_by_platform(self.assets)
+        for platform, assets in platform_assets.items():
+            automation = platform.automation
+            platform_protocols = {
+                p['name']: p['setting'] for p in platform.protocols.values('name', 'setting')
+            }
+            for asset in assets:
+                protocols = self.set_platform_protocol_setting_to_asset(asset, platform_protocols)
+                account = self.select_account(asset)
+                host = self.asset_to_host(asset, account, automation, protocols, platform, path_dir)
+
+                if not automation.ansible_enabled:
+                    host['error'] = _('Ansible disabled')
+
+                if self.host_callback is not None:
+                    host = self.host_callback(
+                        host, asset=asset, account=account,
+                        platform=platform, automation=automation,
+                        path_dir=path_dir
+                    )
+
+                if (
+                        isinstance(host, dict)
+                        and host.get('error')
+                        and 'jms_asset' not in host
+                ):
+                    host['jms_asset'] = {
+                        'id': str(asset.id),
+                        'name': asset.name,
+                        'address': asset.address,
+                    }
+
+                if isinstance(host, list):
+                    hosts.extend(host)
+                else:
+                    hosts.append(host)
+
+        exclude_hosts = list(filter(lambda x: x.get('error'), hosts))
+        if exclude_hosts:
+            print(_("Skip hosts below:"))
+            for i, host in enumerate(exclude_hosts, start=1):
+                print("{}: [{}] \t{}".format(i, host['name'], host['error']))
+                self.exclude_hosts[host['name']] = host['error']
+                self.exclude_host_details[host['name']] = host
+        hosts = list(filter(lambda x: not x.get('error'), hosts))
+        data = {'all': {'hosts': {}}}
+        for host in hosts:
+            name = host.pop('name')
+            data['all']['hosts'][name] = host
+        if not self.exclude_localhost:
+            data['all']['hosts'].update({
+                'localhost': {
+                    'ansible_host': '127.0.0.1',
+                    'ansible_connection': 'local'
+                }
+            })
+        return data
+
+    def write_to_file(self, path):
+        path_dir = os.path.dirname(path)
+        if not os.path.exists(path_dir):
+            os.makedirs(path_dir, 0o700, True)
+        data = self.generate(path_dir)
+        with open(path, 'w') as f:
+            f.write(json.dumps(data, indent=4))
+        os.chmod(path, 0o600)

@@ -2,17 +2,17 @@
 #
 import json
 
-import redis_lock
 import redis
+import redis_lock
 from django.conf import settings
-from django.utils.timezone import get_current_timezone
 from django.db.utils import ProgrammingError, OperationalError
+from django.utils.timezone import get_current_timezone
 from django_celery_beat.models import (
     PeriodicTask, IntervalSchedule, CrontabSchedule, PeriodicTasks
 )
 
-from common.utils.timezone import local_now
 from common.utils import get_logger
+from common.utils.timezone import local_now
 
 logger = get_logger(__name__)
 
@@ -67,7 +67,7 @@ def create_or_update_celery_periodic_tasks(tasks):
             if crontab is None:
                 crontab = CrontabSchedule.objects.create(**kwargs)
         else:
-            logger.error("Schedule is not valid")
+            logger.warning("Schedule is not valid: %s" % name)
             return
 
         defaults = dict(
@@ -75,12 +75,14 @@ def create_or_update_celery_periodic_tasks(tasks):
             crontab=crontab,
             name=name,
             task=detail['task'],
-            enabled=detail.get('enabled', True),
             args=json.dumps(detail.get('args', [])),
             kwargs=json.dumps(detail.get('kwargs', {})),
             description=detail.get('description') or '',
             last_run_at=last_run_at,
         )
+        enabled = detail.get('enabled')
+        if enabled is not None:
+            defaults["enabled"] = enabled
         task = PeriodicTask.objects.update_or_create(
             defaults=defaults, name=name,
         )

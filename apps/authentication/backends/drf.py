@@ -1,121 +1,55 @@
 # -*- coding: utf-8 -*-
 #
+import os
 
-import uuid
-import time
-
-from django.core.cache import cache
-from django.utils.translation import ugettext as _
-from six import text_type
 from django.contrib.auth import get_user_model
-
-from rest_framework import HTTP_HEADER_ENCODING
+from django.core.cache import cache
+from django.utils import timezone
+from django.utils.translation import gettext as _
 from rest_framework import authentication, exceptions
+
+from accounts.models import IntegrationApplication
 from common.auth import signature
-
-from common.utils import get_object_or_none, make_signature, http_to_unixtime
+from common.decorators import merge_delay_run
+from common.utils import get_object_or_none, get_request_ip_or_data, contains_ip, get_request_ip
+from users.models import User
 from ..models import AccessKey, PrivateToken
-from .base import JMSBaseAuthBackend, JMSModelBackend
 
 
-UserModel = get_user_model()
+def date_more_than(d, seconds):
+    return d is None or (timezone.now() - d).seconds > seconds
 
 
-def get_request_date_header(request):
-    date = request.META.get('HTTP_DATE', b'')
-    if isinstance(date, text_type):
-        # Work around django test client oddness
-        date = date.encode(HTTP_HEADER_ENCODING)
-    return date
+@merge_delay_run(ttl=60)
+def update_token_last_used(tokens=()):
+    access_keys_ids = [token.id for token in tokens if isinstance(token, AccessKey)]
+    private_token_keys = [token.key for token in tokens if isinstance(token, PrivateToken)]
+    if len(access_keys_ids) > 0:
+        AccessKey.objects.filter(id__in=access_keys_ids).update(date_last_used=timezone.now())
+    if len(private_token_keys) > 0:
+        PrivateToken.objects.filter(key__in=private_token_keys).update(date_last_used=timezone.now())
 
 
-class AccessKeyAuthentication(authentication.BaseAuthentication):
-    """App使用Access key进行签名认证, 目前签名算法比较简单,
-    app注册或者手动建立后,会生成 access_key_id 和 access_key_secret,
-    然后使用 如下算法生成签名:
-    Signature = md5(access_key_secret + '\n' + Date)
-    example: Signature = md5('d32d2b8b-9a10-4b8d-85bb-1a66976f6fdc' + '\n' +
-                    'Thu, 12 Jan 2017 08:19:41 GMT')
-    请求时设置请求header
-    header['Authorization'] = 'Sign access_key_id:Signature' 如:
-    header['Authorization'] =
-        'Sign d32d2b8b-9a10-4b8d-85bb-1a66976f6fdc:OKOlmdxgYPZ9+SddnUUDbQ=='
+@merge_delay_run(ttl=60)
+def update_user_last_used(users=()):
+    User.objects.filter(id__in=users).update(date_api_key_last_used=timezone.now())
 
-    验证时根据相同算法进行验证, 取到access_key_id对应的access_key_id, 从request
-    headers取到Date, 然后进行md5, 判断得到的结果是否相同, 如果是认证通过, 否则 认证
-    失败
-    """
-    keyword = 'Sign'
 
-    def authenticate(self, request):
-        auth = authentication.get_authorization_header(request).split()
-        if not auth or auth[0].lower() != self.keyword.lower().encode():
-            return None
+@merge_delay_run(ttl=60)
+def update_service_integration_last_used(service_integrations=()):
+    IntegrationApplication.objects.filter(
+        id__in=service_integrations
+    ).update(date_last_used=timezone.now())
 
-        if len(auth) == 1:
-            msg = _('Invalid signature header. No credentials provided.')
-            raise exceptions.AuthenticationFailed(msg)
-        elif len(auth) > 2:
-            msg = _('Invalid signature header. Signature '
-                    'string should not contain spaces.')
-            raise exceptions.AuthenticationFailed(msg)
 
-        try:
-            sign = auth[1].decode().split(':')
-            if len(sign) != 2:
-                msg = _('Invalid signature header. '
-                        'Format like AccessKeyId:Signature')
-                raise exceptions.AuthenticationFailed(msg)
-        except UnicodeError:
-            msg = _('Invalid signature header. '
-                    'Signature string should not contain invalid characters.')
-            raise exceptions.AuthenticationFailed(msg)
-
-        access_key_id = sign[0]
-        try:
-            uuid.UUID(access_key_id)
-        except ValueError:
-            raise exceptions.AuthenticationFailed('Access key id invalid')
-        request_signature = sign[1]
-
-        return self.authenticate_credentials(
-            request, access_key_id, request_signature
-        )
-
-    @staticmethod
-    def authenticate_credentials(request, access_key_id, request_signature):
-        access_key = get_object_or_none(AccessKey, id=access_key_id)
-        request_date = get_request_date_header(request)
-        if access_key is None or not access_key.user:
-            raise exceptions.AuthenticationFailed(_('Invalid signature.'))
-        access_key_secret = access_key.secret
-
-        try:
-            request_unix_time = http_to_unixtime(request_date)
-        except ValueError:
-            raise exceptions.AuthenticationFailed(
-                _('HTTP header: Date not provide '
-                  'or not %a, %d %b %Y %H:%M:%S GMT'))
-
-        if int(time.time()) - request_unix_time > 15 * 60:
-            raise exceptions.AuthenticationFailed(
-                _('Expired, more than 15 minutes'))
-
-        signature = make_signature(access_key_secret, request_date)
-        if not signature == request_signature:
-            raise exceptions.AuthenticationFailed(_('Invalid signature.'))
-
-        if not access_key.user.is_active:
-            raise exceptions.AuthenticationFailed(_('User disabled.'))
-        return access_key.user, None
-
-    def authenticate_header(self, request):
-        return 'Sign access_key_id:Signature'
+def after_authenticate_update_date(user, token=None):
+    update_user_last_used.delay(users=(user.id,))
+    if token:
+        update_token_last_used.delay(tokens=(token,))
 
 
 class AccessTokenAuthentication(authentication.BaseAuthentication):
     keyword = 'Bearer'
-    # expiration = settings.TOKEN_EXPIRATION or 3600
     model = get_user_model()
 
     def authenticate(self, request):
@@ -127,54 +61,63 @@ class AccessTokenAuthentication(authentication.BaseAuthentication):
             msg = _('Invalid token header. No credentials provided.')
             raise exceptions.AuthenticationFailed(msg)
         elif len(auth) > 2:
-            msg = _('Invalid token header. Sign string '
-                    'should not contain spaces.')
+            msg = _('Invalid token header. Sign string should not contain spaces.')
             raise exceptions.AuthenticationFailed(msg)
 
         try:
             token = auth[1].decode()
         except UnicodeError:
-            msg = _('Invalid token header. Sign string '
-                    'should not contain invalid characters.')
+            msg = _('Invalid token header. Sign string should not contain invalid characters.')
             raise exceptions.AuthenticationFailed(msg)
-        return self.authenticate_credentials(token)
+        user, header = self.authenticate_credentials(token)
+        if not user:
+            return None
+        after_authenticate_update_date(user)
+        return user, header
 
-    def authenticate_credentials(self, token):
+    @staticmethod
+    def authenticate_credentials(token):
         model = get_user_model()
         user_id = cache.get(token)
         user = get_object_or_none(model, id=user_id)
-
-        if not user:
-            msg = _('Invalid token or cache refreshed.')
-            raise exceptions.AuthenticationFailed(msg)
         return user, None
 
     def authenticate_header(self, request):
         return self.keyword
 
 
-class PrivateTokenAuthentication(JMSBaseAuthBackend, authentication.TokenAuthentication):
+class PrivateTokenAuthentication(authentication.TokenAuthentication):
     model = PrivateToken
+
+    def authenticate(self, request):
+        user_token = super().authenticate(request)
+        if not user_token:
+            return
+        user, token = user_token
+        after_authenticate_update_date(user, token)
+        return user, token
 
 
 class SessionAuthentication(authentication.SessionAuthentication):
     def authenticate(self, request):
         """
         Returns a `User` if the request session currently has a logged in user.
-        Otherwise returns `None`.
+        Otherwise, returns `None`.
         """
 
         # Get the session-based user from the underlying HttpRequest object
         user = getattr(request._request, 'user', None)
 
         # Unauthenticated, CSRF validation not required
-        if not user or not user.is_active:
+        if not user or not user.is_active or not user.is_valid:
             return None
 
-        try:
-            self.enforce_csrf(request)
-        except exceptions.AuthenticationFailed:
-            return None
+        ignore_csrf_check = os.environ.get("DOMAINS", "") == "*"
+        if not ignore_csrf_check:
+            try:
+                self.enforce_csrf(request)
+            except exceptions.AuthenticationFailed:
+                return None
 
         # CSRF passed with authenticated user
         return user, None
@@ -194,10 +137,48 @@ class SignatureAuthentication(signature.SignatureAuthentication):
         # example implementation:
         try:
             key = AccessKey.objects.get(id=key_id)
-            if not key.is_active:
+            if not key.is_valid:
                 return None, None
             user, secret = key.user, str(key.secret)
+            after_authenticate_update_date(user, key)
             return user, secret
         except (AccessKey.DoesNotExist, exceptions.ValidationError):
             return None, None
 
+    def is_ip_allow(self, key_id, request):
+        try:
+            ak = AccessKey.objects.get(id=key_id)
+            ip_group = ak.ip_group
+            ip = get_request_ip_or_data(request)
+            if not contains_ip(ip, ip_group):
+                return False
+            return True
+        except (AccessKey.DoesNotExist, exceptions.ValidationError):
+            return False
+
+
+class ServiceAuthentication(signature.SignatureAuthentication):
+    __instance = None
+    source = 'jms-pam'
+
+    def get_object(self, key_id):
+        if not self.__instance:
+            self.__instance = IntegrationApplication.objects.filter(
+                id=key_id, is_active=True,
+            ).first()
+        return self.__instance
+
+    def fetch_user_data(self, key_id, algorithm=None):
+        obj = self.get_object(key_id)
+        if not obj:
+            return None, None
+        return obj, obj.secret
+
+    def is_ip_allow(self, key_id, request):
+        obj = self.get_object(key_id)
+        if not contains_ip(get_request_ip(request), obj.ip_group):
+            return False
+        return True
+
+    def after_authenticate_update_date(self, user):
+        update_service_integration_last_used.delay((user.id,))

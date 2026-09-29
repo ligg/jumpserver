@@ -1,0 +1,50 @@
+- hosts: demo
+  gather_facts: yes
+  tasks:
+    - name: Get info
+      ansible.builtin.set_fact:
+        info:
+          vendor: "{{ ansible_system_vendor }}"
+          model: "{{ ansible_product_name }}"
+          sn: "{{ ansible_product_serial }}"
+          cpu_model: "{{ ansible_processor }}"
+          cpu_count: "{{ ansible_processor_count }}"
+          cpu_cores: "{{ ansible_processor_cores }}"
+          cpu_vcpus: "{{ ansible_processor_vcpus }}"
+          memory: "{{ ansible_memtotal_mb / 1024 | round(2) }}"
+          disk_total: |-
+            {% set ns = namespace(total=0) %}
+            {%- for name, dev in ansible_devices.items() if dev.removable == '0' and dev.host != ''  -%}
+              {%- set ns.total = ns.total + ( dev.sectors | int * dev.sectorsize | int ) -%}
+            {%- endfor -%}
+            {{- (ns.total / 1024 / 1024 / 1024) | round(2) -}}
+          distribution: "{{ ansible_distribution }}"
+          distribution_version: "{{ ansible_distribution_version }}"
+          arch: "{{ ansible_architecture }}"
+          kernel: "{{ ansible_kernel }}"
+
+
+    - name: Get MAC addresses
+      shell: |
+        for iface in $(ls /sys/class/net/ | grep -v '^lo$'); do
+          mac=$(cat /sys/class/net/$iface/address 2>/dev/null)
+          if [ -n "$mac" ] && [ "$mac" != "00:00:00:00:00:00" ]; then
+            echo "${iface}: ${mac}"
+          fi
+        done
+      register: mac_info
+      ignore_errors: yes
+
+    - name: Merge MAC info into final info
+      set_fact:
+        info: "{{ info | combine({'mac_address': mac_info.stdout_lines | default([])}) }}"
+
+    - name: Get GPU info with nvidia-smi
+      shell: |
+        nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits
+      register: gpu_info
+      ignore_errors: yes
+
+    - name: Merge GPU info into final info
+      set_fact:
+        info: "{{ info | combine({'gpu_model': gpu_info.stdout_lines | default([])}) }}"

@@ -1,0 +1,66 @@
+- hosts: custom
+  gather_facts: no
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ local_python_interpreter }}"
+    ansible_become: false
+
+  tasks:
+    - name: Push asset password (paramiko)
+      custom_command:
+        login_user: "{{ jms_account.username }}"
+        login_password: >-
+          {{ jms_account.secret
+             if jms_account.secret_type == 'password' else '' }}
+        login_host: "{{ jms_asset.address }}"
+        login_port: "{{ jms_asset.port }}"
+        login_secret_type: "{{ jms_account.secret_type }}"
+        login_private_key_path: "{{ jms_account.private_key_path }}"
+        become: "{{ jms_custom_become | default(False) }}"
+        become_method: "{{ jms_custom_become_method | default('su') }}"
+        become_user: "{{ jms_custom_become_user | default('') }}"
+        become_password: "{{ jms_custom_become_password | default('') }}"
+        become_private_key_path: "{{ jms_custom_become_private_key_path | default(None) }}"
+        name: "{{ account.username }}"
+        password: "{{ account.secret }}"
+        commands: "{{ params.commands }}"
+        answers: "{{ params.answers }}"
+        recv_timeout: "{{ params.recv_timeout | default(30) }}"
+        delay_time: "{{ params.delay_time | default(2) }}"
+        prompt: "{{ params.prompt | default('.*') }}"
+        old_ssh_version: "{{ jms_asset.old_ssh_version | default(False) }}"
+        gateway_args: "{{ jms_asset.ansible_ssh_common_args | default(None) }}"
+      ignore_errors: true
+      register: change_info
+      delegate_to: localhost
+      connection: local
+
+    - name: Verify password (paramiko)
+      ssh_ping:
+        login_user: "{{ account.username }}"
+        login_password: >-
+          {{ account.secret if account.secret_type == 'password' else '' }}
+        login_secret_type: "{{ account.secret_type }}"
+        login_private_key_path: "{{ account.private_key_path }}"
+        login_host: "{{ jms_asset.address }}"
+        login_port: "{{ jms_asset.port }}"
+        become: >-
+          {{ (account.become.ansible_become | default(False))
+             and account.secret_type == 'password' }}
+        become_method: >-
+          {{ (account.become.ansible_become_method | default('su'))
+             if (account.become.ansible_become_method | default('su'))
+                in ['enable', 'super', 'super_level']
+             else 'su' }}
+        become_user: "{{ account.become.ansible_user | default('') }}"
+        become_password: "{{ account.become.ansible_password | default('') }}"
+        become_private_key_path: "{{ account.become.ansible_ssh_private_key_file | default(None) }}"
+        old_ssh_version: "{{ jms_asset.old_ssh_version | default(False) }}"
+        gateway_args: "{{ jms_asset.ansible_ssh_common_args | default(None) }}"
+        recv_timeout: "{{ params.recv_timeout | default(30) }}"
+        auth_only: true
+        fail_on_unknown: false
+        change_succeeded: "{{ not (change_info.failed | default(false)) }}"
+      delegate_to: localhost
+      connection: local
+      when: check_conn_after_change or change_info.failed | default(false)

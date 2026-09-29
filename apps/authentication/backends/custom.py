@@ -1,10 +1,10 @@
 from django.conf import settings
-from django.utils.module_loading import import_string
-from common.utils import get_logger
 from django.contrib.auth import get_user_model
-from authentication.signals import user_auth_failed, user_auth_success
+from django.utils.module_loading import import_string
+from django.utils.translation import gettext_lazy as _
 
-from .base import JMSModelBackend
+from common.utils import get_logger
+from .base import JMSBaseAuthBackend
 
 logger = get_logger(__file__)
 
@@ -19,9 +19,10 @@ if settings.AUTH_CUSTOM:
         logger.warning('Import custom auth method failed: {}, Maybe not enabled'.format(e))
 
 
-class CustomAuthBackend(JMSModelBackend):
+class CustomAuthBackend(JMSBaseAuthBackend):
 
-    def is_enabled(self):
+    @staticmethod
+    def is_enabled():
         return settings.AUTH_CUSTOM and callable(custom_authenticate_method)
 
     @staticmethod
@@ -34,10 +35,10 @@ class CustomAuthBackend(JMSModelBackend):
         )
         return user, created
 
-    def authenticate(self, request, username=None, password=None, **kwargs):
+    def authenticate(self, request, username=None, password=None):
         try:
             userinfo: dict = custom_authenticate_method(
-                username=username, password=password, **kwargs
+                username=username, password=password
             )
             user, created = self.get_or_create_user_from_userinfo(userinfo)
         except Exception as e:
@@ -46,16 +47,7 @@ class CustomAuthBackend(JMSModelBackend):
 
         if self.user_can_authenticate(user):
             logger.info(f'Custom authenticate success: {user.username}')
-            user_auth_success.send(
-                sender=self.__class__, request=request, user=user,
-                backend=settings.AUTH_BACKEND_CUSTOM
-            )
             return user
         else:
             logger.info(f'Custom authenticate failed: {user.username}')
-            user_auth_failed.send(
-                sender=self.__class__, request=request, username=user.username,
-                reason=_('User invalid, disabled or expired'),
-                backend=settings.AUTH_BACKEND_CUSTOM
-            )
             return None

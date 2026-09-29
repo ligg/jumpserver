@@ -1,18 +1,36 @@
 # -*- coding: utf-8 -*-
 #
 
+import datetime
 import os
+
+from .base import CONFIG, INSTALLED_APPS, TEMPLATES
 from .. import const
-from .base import INSTALLED_APPS, TEMPLATES
+
+current_year = datetime.datetime.now().year
+corporation = f'FIT2CLOUD 飞致云 © 2014-{current_year}'
 
 XPACK_DIR = os.path.join(const.BASE_DIR, 'xpack')
-# XPACK_ENABLED = False
-XPACK_ENABLED = os.path.isdir(XPACK_DIR)
+XPACK_DISABLED = os.environ.get('XPACK_ENABLED') in ['0', 'false', 'False', 'no', 'No']
+XPACK_ENABLED = False
+if not XPACK_DISABLED:
+    XPACK_ENABLED = os.path.isdir(XPACK_DIR)
+# JDMC can only be disabled explicitly in development mode.
+JDMC_ENABLED = XPACK_ENABLED and (CONFIG.JDMC_ENABLED or not CONFIG.DEBUG_DEV)
 XPACK_TEMPLATES_DIR = []
 XPACK_CONTEXT_PROCESSOR = []
+XPACK_LICENSE_IS_VALID = False
+XPACK_LICENSE_EDITION = ""
+XPACK_LICENSE_EDITION_ULTIMATE = False
+XPACK_LICENSE_INFO = {
+    'corporation': corporation,
+}
+
+XPACK_LICENSE_CONTENT = 'community'
 
 if XPACK_ENABLED:
     from xpack.utils import get_xpack_templates_dir, get_xpack_context_processor
+
     INSTALLED_APPS.insert(0, 'xpack.apps.XpackConfig')
     XPACK_TEMPLATES_DIR = get_xpack_templates_dir(const.BASE_DIR)
     XPACK_CONTEXT_PROCESSOR = get_xpack_context_processor()

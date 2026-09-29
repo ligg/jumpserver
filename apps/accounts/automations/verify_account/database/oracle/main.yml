@@ -1,0 +1,15 @@
+- hosts: oracle
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ local_python_interpreter }}"
+
+  tasks:
+    - name: Verify account
+      oracle_ping:
+        login_user: "{{ account.username }}"
+        login_password: "{{ account.secret }}"
+        login_host: "{{ jms_asset.address }}"
+        login_port: "{{ jms_asset.port }}"
+        login_database: "{{ jms_asset.spec_info.db_name }}"
+        mode: "{{ account.mode }}"
+        connect_timeout: 15

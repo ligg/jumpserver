@@ -4,7 +4,6 @@ from django.urls import path
 
 from . import views
 
-
 urlpatterns = [
     path('login/', views.Saml2AuthRequestView.as_view(), name='saml2-login'),
     path('logout/', views.Saml2EndSessionView.as_view(), name='saml2-logout'),

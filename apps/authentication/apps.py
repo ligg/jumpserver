@@ -1,13 +1,13 @@
 from django.apps import AppConfig
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 
 class AuthenticationConfig(AppConfig):
     name = 'authentication'
-    verbose_name = _('Authentication')
+    verbose_name = _('App Authentication')
 
     def ready(self):
-        from . import signal_handlers
-        from . import notifications
+        from . import signal_handlers  # noqa
+        from . import tasks  # noqa
+        from . import notifications  # noqa
         super().ready()
-

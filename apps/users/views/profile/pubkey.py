@@ -1,11 +1,14 @@
 # ~*~ coding: utf-8 ~*~
 
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.views import View
 
-from common.utils import get_logger, ssh_key_gen
+from authentication.serializers import SSHKeySerializer
 from common.permissions import IsValidUser
-from common.mixins.views import PermissionsMixin
+from common.utils import get_logger, ssh_key_gen
+from common.views.mixins import PermissionsMixin
+from users.exceptions import CreateSSHKeyExceedLimit
+from django.conf import settings
 
 __all__ = ['UserPublicKeyGenerateView']
 
@@ -17,9 +20,18 @@ class UserPublicKeyGenerateView(PermissionsMixin, View):
 
     def get(self, request, *args, **kwargs):
         username = request.user.username
-        private, public = ssh_key_gen(username=username, hostname='jumpserver')
-        request.user.set_public_key(public)
+        serializer = SSHKeySerializer(data=request.GET, context={'request': request})
+        if not serializer.is_valid():
+            return JsonResponse(serializer.errors, status=400)
+        if not request.user.can_create_ssh_key():
+            return HttpResponse(
+                CreateSSHKeyExceedLimit().default_detail, status=400
+            )
+        
+        hostname = settings.VENDOR.lower()
+        private, public = ssh_key_gen(username=username, hostname=hostname)
+        request.user.set_ssh_key(public, private, **serializer.validated_data)
         response = HttpResponse(private, content_type='text/plain')
-        filename = "{0}-jumpserver.pem".format(username)
+        filename = "{0}-{1}.pem".format(username, hostname)
         response['Content-Disposition'] = 'attachment; filename={}'.format(filename)
         return response

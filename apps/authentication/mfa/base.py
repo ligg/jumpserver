@@ -1,10 +1,14 @@
 import abc
 
-from django.utils.translation import ugettext_lazy as _
+from django.conf import settings
+from django.core.cache import cache
+from django.utils.translation import gettext_lazy as _
 
 
 class BaseMFA(abc.ABC):
     placeholder = _('Please input security code')
+    skip_cache_check = False
+    has_code = True
 
     def __init__(self, user):
         """
@@ -12,9 +16,36 @@ class BaseMFA(abc.ABC):
         因为首页登录时，可能没法获取到一些状态
         """
         self.user = user
+        self.request = None
+
+    def check_code(self, code):
+        if self.skip_cache_check:
+            return self._check_code(code)
+
+        cache_key = f'{self.name}_{self.user.username}'
+        cache_code = cache.get(cache_key)
+
+        is_match = cache_code == code
+
+        if settings.SAFE_MODE and is_match:
+            return False, _(
+                "The two-factor code you entered has either already been used or has expired. "
+                "Please request a new one."
+            )
+
+        ok, msg = self._check_code(code)
+
+        if not ok:
+            return False, msg
+
+        cache.set(cache_key, code, settings.VERIFY_CODE_TTL)
+        return True, msg
 
     def is_authenticated(self):
         return self.user and self.user.is_authenticated
+
+    def set_request(self, request):
+        self.request = request
 
     @property
     @abc.abstractmethod
@@ -34,7 +65,7 @@ class BaseMFA(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def check_code(self, code) -> tuple:
+    def _check_code(self, code) -> tuple:
         return False, 'Error msg'
 
     @abc.abstractmethod
@@ -69,4 +100,3 @@ class BaseMFA(abc.ABC):
     @staticmethod
     def help_text_of_disable():
         return ''
-

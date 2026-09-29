@@ -1,0 +1,31 @@
+{% load i18n %}
+<h3></h3>
+<table style="width: 100%; border-collapse: collapse; table-layout: fixed; text-align: left; margin-top: 20px;">
+    <caption></caption>
+    <tr style="background-color: #f2f2f2;">
+        <th style="border: 1px solid #ddd; padding: 15px; text-align: left; vertical-align: top; line-height: 1.5;">
+            {% trans 'Asset' %}
+        </th>
+        <th style="border: 1px solid #ddd; padding: 15px; text-align: left; vertical-align: top; line-height: 1.5;">
+            {% trans 'Add account' %}
+        </th>
+        <th style="border: 1px solid #ddd; padding: 15px; text-align: left; vertical-align: top; line-height: 1.5;">
+            {% trans 'Deleted account' %}
+        </th>
+    </tr>
+    {% for name, change in change_info.items %}
+        <tr style="{% cycle 'background-color: #ebf5ff;' 'background-color: #fff;' %}">
+            <td style="border: 1px solid #ddd; padding: 10px; text-align: left; vertical-align: top;">
+                {{ name | safe }}
+            </td>
+            <td style="border: 1px solid #ddd; padding: 10px; text-align: left; vertical-align: top;">
+                {{ change.add_usernames | join:" " | safe }}
+            </td>
+            <td style="border: 1px solid #ddd; padding: 10px; text-align: left; vertical-align: top;">
+                {{ change.remove_usernames | join:" " | safe }}
+            </td>
+        </tr>
+    {% endfor %}
+</table>
+
+

@@ -10,15 +10,14 @@ import datetime as dt
 from calendar import timegm
 from urllib.parse import urlparse
 
+from django.conf import settings
 from django.core.exceptions import SuspiciousOperation
-from django.utils.encoding import force_bytes, smart_bytes
+from django.utils.encoding import force_bytes
 from jwkest import JWKESTException
 from jwkest.jwk import KEYS
 from jwkest.jws import JWS
-from django.conf import settings
 
 from common.utils import get_logger
-
 
 logger = get_logger(__file__)
 
@@ -59,7 +58,7 @@ def _get_jwks_keys(shared_key):
     # Adds the shared key (which can correspond to the client_secret) as an oct key so it can be
     # used for HMAC signatures.
     logger.debug(log_prompt.format('Add key'))
-    jwks_keys.add({'key': smart_bytes(shared_key), 'kty': 'oct'})
+    jwks_keys.add({'key': force_bytes(shared_key), 'kty': 'oct'})
     logger.debug(log_prompt.format('End'))
     return jwks_keys
 
@@ -99,7 +98,8 @@ def _validate_claims(id_token, nonce=None, validate_nonce=True):
         raise SuspiciousOperation('Incorrect id_token: nbf')
 
     # Verifies that the token was issued in the allowed timeframe.
-    if utc_timestamp > id_token['iat'] + settings.AUTH_OPENID_ID_TOKEN_MAX_AGE:
+    max_age = settings.AUTH_OPENID_ID_TOKEN_MAX_AGE
+    if utc_timestamp > id_token['iat'] + max_age:
         logger.debug(log_prompt.format('Incorrect id_token: iat'))
         raise SuspiciousOperation('Incorrect id_token: iat')
 

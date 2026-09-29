@@ -1,29 +1,32 @@
-from rest_framework.response import Response
-from rest_framework.mixins import ListModelMixin, RetrieveModelMixin
 from rest_framework.decorators import action
+from rest_framework.mixins import ListModelMixin, RetrieveModelMixin
+from rest_framework.response import Response
+from django.shortcuts import get_object_or_404
 
-from common.http import is_true
-from common.permissions import IsValidUser
+from common.api import JMSGenericViewSet
 from common.const.http import GET, PATCH, POST
-from common.drf.api import JMSGenericViewSet
+from common.permissions import IsValidUser, OnlySuperUser
+from common.utils.http import is_true
 from ..serializers import (
-    SiteMessageDetailSerializer, SiteMessageIdsSerializer,
+    SiteMessageSerializer, SiteMessageIdsSerializer,
     SiteMessageSendSerializer,
 )
 from ..site_msg import SiteMessageUtil
-from ..filters import SiteMsgFilter
+from ..models import MessageContent, SiteMessage
 
-__all__ = ('SiteMessageViewSet', )
+
+__all__ = ('SiteMessageViewSet',)
 
 
 class SiteMessageViewSet(ListModelMixin, RetrieveModelMixin, JMSGenericViewSet):
+    queryset = SiteMessage.objects.none()
     permission_classes = (IsValidUser,)
     serializer_classes = {
-        'default': SiteMessageDetailSerializer,
+        'default': SiteMessageSerializer,
         'mark_as_read': SiteMessageIdsSerializer,
         'send': SiteMessageSendSerializer,
     }
-    filterset_class = SiteMsgFilter
+    filterset_fields = ('has_read',)
 
     def get_queryset(self):
         user = self.request.user
@@ -44,9 +47,9 @@ class SiteMessageViewSet(ListModelMixin, RetrieveModelMixin, JMSGenericViewSet):
     @action(methods=[PATCH], detail=False, url_path='mark-as-read')
     def mark_as_read(self, request, **kwargs):
         user = request.user
-        seri = self.get_serializer(data=request.data)
-        seri.is_valid(raise_exception=True)
-        ids = seri.validated_data['ids']
+        s = self.get_serializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        ids = s.validated_data['ids']
         SiteMessageUtil.mark_msgs_as_read(user.id, ids)
         return Response({'detail': 'ok'})
 
@@ -56,9 +59,18 @@ class SiteMessageViewSet(ListModelMixin, RetrieveModelMixin, JMSGenericViewSet):
         SiteMessageUtil.mark_msgs_as_read(user.id)
         return Response({'detail': 'ok'})
 
-    @action(methods=[POST], detail=False)
+    @action(methods=[POST], detail=False, permission_classes=[OnlySuperUser,])
     def send(self, request, **kwargs):
-        seri = self.get_serializer(data=request.data)
-        seri.is_valid(raise_exception=True)
-        SiteMessageUtil.send_msg(**seri.validated_data, sender=request.user)
+        s = self.get_serializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        site_msg = SiteMessageUtil.send_msg(**s.validated_data, sender=request.user)
+        if site_msg:
+            return Response({'detail': 'ok', 'site_msg_id': str(site_msg.id)})
+        else:
+            return Response({'detail': 'error'})
+
+    @action(methods=[PATCH], detail=True, permission_classes=[OnlySuperUser,])
+    def revoke(self, request, **kwargs):
+        msg = get_object_or_404(MessageContent, id=kwargs['pk'])
+        msg.revoke_msg()
         return Response({'detail': 'ok'})

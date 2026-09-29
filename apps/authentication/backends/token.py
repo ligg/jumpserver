@@ -3,14 +3,20 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied
 
 from authentication.models import TempToken
-from .base import JMSModelBackend
+from .base import JMSBaseAuthBackend
 
 
-class TempTokenAuthBackend(JMSModelBackend):
+class TempTokenAuthBackend(JMSBaseAuthBackend):
     model = TempToken
 
-    def authenticate(self, request, username='', password='', *args, **kwargs):
-        token = self.model.objects.filter(username=username, secret=password).first()
+    @staticmethod
+    def is_enabled():
+        return settings.AUTH_TEMP_TOKEN
+
+    def authenticate(self, request, username='', password=''):
+        tokens = self.model.objects.filter(username=username).order_by('-date_created')[:500]
+        token = next((t for t in tokens if t.secret == password), None)
+
         if not token:
             return None
         if not token.is_valid:
@@ -21,6 +27,3 @@ class TempTokenAuthBackend(JMSModelBackend):
         token.save()
         return token.user
 
-    @staticmethod
-    def is_enabled():
-        return settings.AUTH_TEMP_TOKEN

@@ -1,4 +1,4 @@
-from django.utils.translation import ugettext_noop
+from django.utils.translation import gettext_noop
 
 from .const import Scope, system_exclude_permissions, org_exclude_permissions
 
@@ -7,6 +7,10 @@ _view_root_perms = (
 )
 _view_all_joined_org_perms = (
     ('orgs', 'organization', 'view', 'alljoinedorg'),
+)
+
+chat_ai_user_perms = (
+    ('chat_ai', 'runtimestore', 'use', 'chatai'),
 )
 
 user_perms = (
@@ -18,36 +22,52 @@ user_perms = (
     ('assets', 'asset', 'match', 'asset'),
     ('assets', 'systemuser', 'match', 'systemuser'),
     ('assets', 'node', 'match', 'node'),
-    ('applications', 'application', 'match', 'application'),
-    ('ops', 'commandexecution', 'add', 'commandexecution'),
+    ("ops", "adhoc", "*", "*"),
+    ("ops", "playbook", "*", "*"),
+    ("ops", "job", "*", "*"),
+    ("ops", "jobexecution", "*", "*"),
+    ("ops", "celerytaskexecution", "view", "*"),
+    ("users", "user", "match", "user"),
+    *chat_ai_user_perms,
 )
 
 system_user_perms = (
-    ('authentication', 'connectiontoken', 'add,view', 'connectiontoken'),
+    ('authentication', 'connectiontoken', 'add,view,reuse,expire', 'connectiontoken'),
     ('authentication', 'temptoken', 'add,change,view', 'temptoken'),
     ('authentication', 'accesskey', '*', '*'),
+    ('authentication', 'passkey', '*', '*'),
+    ('authentication', 'sshkey', '*', '*'),
     ('tickets', 'ticket', 'view', 'ticket'),
-) + user_perms + _view_all_joined_org_perms
+)
+system_user_perms += (user_perms + _view_all_joined_org_perms)
 
 _auditor_perms = (
     ('rbac', 'menupermission', 'view', 'audit'),
+    ('rbac', 'menupermission', 'view', 'userloginreport'),
+    ('rbac', 'menupermission', 'view', 'userchangepasswordreport'),
+    ('rbac', 'menupermission', 'view', 'assetstatisticsreport'),
+    ('rbac', 'menupermission', 'view', 'assetactivityreport'),
+    ('rbac', 'menupermission', 'view', 'accountstatisticsreport'),
+    ('rbac', 'menupermission', 'view', 'accountautomationreport'),
+    ('assets', 'asset', 'view', 'asset'),
+    ('users', 'user', 'view', 'user'),
     ('audits', '*', '*', '*'),
+    ('audits', 'joblog', '*', '*'),
     ('terminal', 'commandstorage', 'view', 'commandstorage'),
     ('terminal', 'sessionreplay', 'view,download', 'sessionreplay'),
     ('terminal', 'session', '*', '*'),
     ('terminal', 'command', '*', '*'),
-    ('ops', 'commandexecution', 'view', 'commandexecution'),
 )
 
 auditor_perms = user_perms + _auditor_perms
 
 system_auditor_perms = system_user_perms + _auditor_perms + _view_root_perms
 
-
 app_exclude_perms = [
     ('users', 'user', 'add,delete', 'user'),
     ('orgs', 'org', 'add,delete,change', 'org'),
     ('rbac', '*', '*', '*'),
+    *chat_ai_user_perms,
 ]
 
 need_check = [
@@ -108,25 +128,25 @@ class PredefineRole:
 
 class BuiltinRole:
     system_admin = PredefineRole(
-        '1', ugettext_noop('SystemAdmin'), Scope.system, []
+        '1', gettext_noop('SystemAdmin'), Scope.system, []
     )
     system_auditor = PredefineRole(
-        '2', ugettext_noop('SystemAuditor'), Scope.system, system_auditor_perms
+        '2', gettext_noop('SystemAuditor'), Scope.system, system_auditor_perms
     )
     system_component = PredefineRole(
-        '4', ugettext_noop('SystemComponent'), Scope.system, app_exclude_perms, 'exclude'
+        '4', gettext_noop('SystemComponent'), Scope.system, app_exclude_perms, 'exclude'
     )
     system_user = PredefineRole(
-        '3', ugettext_noop('User'), Scope.system, system_user_perms
+        '3', gettext_noop('SystemUser'), Scope.system, system_user_perms
     )
     org_admin = PredefineRole(
-        '5', ugettext_noop('OrgAdmin'), Scope.org, []
+        '5', gettext_noop('OrgAdmin'), Scope.org, []
     )
     org_auditor = PredefineRole(
-        '6', ugettext_noop('OrgAuditor'), Scope.org, auditor_perms
+        '6', gettext_noop('OrgAuditor'), Scope.org, auditor_perms
     )
     org_user = PredefineRole(
-        '7', ugettext_noop('OrgUser'), Scope.org, user_perms
+        '7', gettext_noop('OrgUser'), Scope.org, user_perms
     )
     system_role_mapper = None
     org_role_mapper = None
@@ -149,7 +169,7 @@ class BuiltinRole:
                 'User': cls.system_user.get_role(),
                 'Auditor': cls.system_auditor.get_role()
             }
-        return cls.system_role_mapper[name]
+        return cls.system_role_mapper.get(name, cls.system_role_mapper['User'])
 
     @classmethod
     def get_org_role_by_old_name(cls, name):
@@ -159,13 +179,14 @@ class BuiltinRole:
                 'User': cls.org_user.get_role(),
                 'Auditor': cls.org_auditor.get_role(),
             }
-        return cls.org_role_mapper[name]
+        return cls.org_role_mapper.get(name, cls.org_role_mapper['User'])
 
     @classmethod
     def sync_to_db(cls, show_msg=False):
         roles = cls.get_roles()
+        print("  - Update builtin roles")
 
         for pre_role in roles.values():
             role, created = pre_role.update_or_create_role()
             if show_msg:
-                print("Update builtin Role: {} - {}".format(role.name, created))
+                print("    - Update: {} - {}".format(role.name, created))

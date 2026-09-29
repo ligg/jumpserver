@@ -1,38 +1,32 @@
-import json
-from importlib import import_module
 import inspect
+from importlib import import_module
 
-from django.utils.functional import LazyObject
-from django.db.models.signals import post_save
-from django.db.models.signals import post_migrate
-from django.dispatch import receiver
 from django.apps import AppConfig
+from django.db.models.signals import post_migrate
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from django.utils.functional import LazyObject
 
+from common.decorators import on_transaction_commit
+from common.utils import get_logger
+from common.utils.connection import RedisPubSub
 from notifications.backends import BACKEND
 from users.models import User
-from common.utils.connection import RedisPubSub
-from common.utils import get_logger
-from common.decorator import on_transaction_commit
-from .models import SiteMessage, SystemMsgSubscription, UserMsgSubscription
+from .models import MessageContent, SystemMsgSubscription, UserMsgSubscription
 from .notifications import SystemMessage
-
 
 logger = get_logger(__name__)
 
 
-def new_site_msg_pub_sub():
-    return RedisPubSub('notifications.SiteMessageCome')
-
-
 class NewSiteMsgSubPub(LazyObject):
     def _setup(self):
-        self._wrapped = new_site_msg_pub_sub()
+        self._wrapped = RedisPubSub('notifications.SiteMessageCome')
 
 
 new_site_msg_chan = NewSiteMsgSubPub()
 
 
-@receiver(post_save, sender=SiteMessage)
+@receiver(post_save, sender=MessageContent)
 @on_transaction_commit
 def on_site_message_create(sender, instance, created, **kwargs):
     if not created:
@@ -76,9 +70,14 @@ def create_system_messages(app_config: AppConfig, **kwargs):
 
             message_type = obj.get_message_type()
             sub, created = SystemMsgSubscription.objects.get_or_create(message_type=message_type)
-            if created:
+            if not created:
+                return
+
+            try:
                 obj.post_insert_to_db(sub)
-                logger.info(f'Create SystemMsgSubscription: package={app_config.module.__package__} type={message_type}')
+                logger.info(f'Create MsgSubscription: package={app_config.module.__package__} type={message_type}')
+            except:
+                pass
     except ModuleNotFoundError:
         pass
 

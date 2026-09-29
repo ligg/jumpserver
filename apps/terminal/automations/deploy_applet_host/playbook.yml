@@ -1,0 +1,294 @@
+---
+- hosts: all
+  vars:
+    APPLET_DOWNLOAD_HOST: https://demo.example.com
+    IGNORE_VERIFY_CERTS: true
+    HOST_NAME: test
+    HOST_ID: 00000000-0000-0000-0000-000000000000
+    CORE_HOST: https://demo.example.com
+    BOOTSTRAP_TOKEN: PleaseChangeMe
+    RDS_Licensing: false
+    RDS_LicenseServer: 127.0.0.1
+    RDS_LicensingMode: 4
+    RDS_fSingleSessionPerUser: 1
+    RDS_MaxDisconnectionTime: 60000
+    RDS_RemoteAppLogoffTimeLimit: 0
+    INSTALL_APPLETS: true
+    PYTHON_VERSION: 3.11.11
+    # WebLite MSI requires Tinker with %ProgramFiles%/JumpServer/ executable support.
+    TINKER_VERSION: v0.3.0
+
+  tasks:
+    - block:
+        - name: Check if CORE_HOST is redirects
+          ansible.windows.win_uri:
+            url: "{{ CORE_HOST }}"
+            method: GET
+            follow_redirects: none
+            status_code: [ 200, 301, 302, 303, 307, 308 ]
+            validate_certs: "{{ not IGNORE_VERIFY_CERTS }}"
+          register: core_host_redirects
+
+        - name: Check failed
+          fail:
+            msg: "CORE_HOST {{ CORE_HOST }} is redirecting to {{ core_host_redirects.location }}, please use the final url"
+          when: core_host_redirects.status_code >= 300 and core_host_redirects.status_code < 400
+
+        - name: Create Tinker keyfile
+          ansible.windows.win_powershell:
+            script: |
+              [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+              function New-RandomString {
+                  param (
+                      [int]$Length = 16
+                  )
+                  $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+                  $random = -join ((1..$Length) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+                  return $random
+              }
+              $targetPath = "$env:USERPROFILE\AppData\Local\Programs\Tinker\data\keys\access_key"
+              if (Test-Path -Path $targetPath) {
+                Write-Output "access_key already exists at $targetPath"
+                return
+                }
+              $randomStr = New-RandomString -Length 7
+              $dir = [System.IO.Path]::GetDirectoryName($targetPath)
+              if (-not (Test-Path -Path $dir)) {
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+              }
+              $url = "{{ CORE_HOST }}/api/v1/terminal/terminal-registrations/"
+
+              $body = @{
+                "name" = "[Tinker]-{{ HOST_NAME }}-$randomStr"
+                "comment" = "tinker"
+                "type" = "tinker"
+                }| ConvertTo-Json
+              $headers = @{
+                  "Authorization" = "BootstrapToken {{ BOOTSTRAP_TOKEN }}"
+                  "Content-Type"  = "application/json"
+              }
+              $response = Invoke-RestMethod -Uri $url -Method Post -Body $body -Headers $headers
+              Write-Output "Response: $($response | ConvertTo-Json -Depth 5)"
+              $accessKey = $response.service_account.access_key.id
+              $accessSecret = $response.service_account.access_key.secret
+              if ($accessKey -and $accessSecret) {
+                  $utf8NoBOM = New-Object System.Text.UTF8Encoding($false)
+                  [System.IO.File]::WriteAllText($targetPath, "${accessKey}:${accessSecret}", $utf8NoBOM)
+                  Write-Output "access_key save to $targetPath"
+              } else {
+                  Write-Error "Failed to get access_key or access_secret。"
+              }
+        - name: Install RDS-RD-Server (RDS)
+          ansible.windows.win_feature:
+            name: RDS-RD-Server
+            state: present
+            include_management_tools: yes
+          register: rds_install
+
+        - name: Stop Tinkerd service first
+          ansible.windows.win_powershell:
+            script: |
+              $serviceName = "JumpServer Tinker"
+              $eventLogKey = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$serviceName"
+              $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+              if ($svc) {
+                  Write-Output "Service found: $serviceName"
+                  try {
+                      sc.exe config "$serviceName" start= disabled | Out-Null
+                      Write-Output "Service disabled"
+                  } catch {
+                      Write-Output "Disable failed, continue..."
+                  }
+                  if ($svc.Status -ne 'Stopped') {
+                      try {
+                          Stop-Service -Name $serviceName -Force -ErrorAction Stop
+                          Write-Output "Service stopped"
+                      } catch {
+                          Write-Output "Stop-Service failed, continue..."
+                      }
+                      $timeout = 10
+                      while ($timeout -gt 0) {
+                          $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                          if (!$current -or $current.Status -eq 'Stopped') { break }
+                          Start-Sleep -Seconds 1
+                          $timeout--
+                      }
+                  }
+                  try {
+                      sc.exe delete "$serviceName" | Out-Null
+                      Write-Output "Service deleted"
+                  } catch {
+                      Write-Output "Delete failed, continue..."
+                  }
+              }
+              if (Test-Path $eventLogKey) {
+                  Remove-Item -Path $eventLogKey -Recurse -Force
+                  Write-Output "EventLog source registry key deleted."
+              }
+        - name: Stop Tinker before install
+          ansible.windows.win_powershell:
+            script: |
+              if (Get-Process -Name 'tinker' -ErrorAction SilentlyContinue) {
+                TASKKILL /F /IM tinker.exe /T
+              }
+              else {
+               $Ansible.Changed = $false
+              }
+
+        - name: Download Tinker installer
+          ansible.windows.win_get_url:
+            url: "{{ APPLET_DOWNLOAD_HOST }}/download/applets/Tinker_Installer_{{ TINKER_VERSION }}.exe"
+            dest: "{{ ansible_env.TEMP }}\\Tinker_Installer_{{ TINKER_VERSION }}.exe"
+            validate_certs: "{{ not IGNORE_VERIFY_CERTS }}"
+
+        - name: Install Tinker
+          ansible.windows.win_package:
+            path: "{{ ansible_env.TEMP }}\\Tinker_Installer_{{ TINKER_VERSION }}.exe"
+            arguments:
+              - /VERYSILENT
+              - /SUPPRESSMSGBOXES
+              - /NORESTART
+            state: present
+
+        - name: Set Tinkerd on the global system path
+          ansible.windows.win_path:
+            elements:
+              - '%USERPROFILE%\AppData\Local\Programs\Tinker\'
+            scope: user
+
+        - name: Download python-{{ PYTHON_VERSION }}
+          ansible.windows.win_get_url:
+            url: "{{ APPLET_DOWNLOAD_HOST }}/download/applets/jumpserver-tinker-python-{{ PYTHON_VERSION }}-win64.zip"
+            dest: "{{ ansible_env.TEMP }}\\jumpserver-tinker-python-{{ PYTHON_VERSION }}-win64.zip"
+            validate_certs: "{{ not IGNORE_VERIFY_CERTS }}"
+
+        - name: Install the python-{{ PYTHON_VERSION }}
+          community.windows.win_unzip:
+            src: "{{ ansible_env.TEMP }}\\jumpserver-tinker-python-{{ PYTHON_VERSION }}-win64.zip"
+            dest: "%ProgramFiles%\\JumpServer\\applications"
+
+        - name: Check and Clean global system path (Python)
+          ansible.windows.win_path:
+            elements:
+              - 'C:\Program Files\Python310\Scripts'
+              - 'C:\Program Files\Python310'
+              - 'C:\Program Files\Python311\Scripts'
+              - 'C:\Program Files\Python311'
+            state: absent
+
+        - name: Set python-{{ PYTHON_VERSION }} on the global system path
+          ansible.windows.win_path:
+            elements:
+              - '%ProgramFiles%\JumpServer\applications\Python'
+              - '%ProgramFiles%\JumpServer\applications\Python\Scripts'
+
+        - name: Set python-{{ PYTHON_VERSION }} on the global system python path
+          ansible.windows.win_path:
+            name: PYTHONPATH
+            scope: machine
+            elements:
+              - '%ProgramFiles%\JumpServer\applications\Python\packages'
+              - '%ProgramFiles%\JumpServer\applications\Python\Lib\site-packages'
+
+        - name: Reboot if installing requires it
+          ansible.windows.win_reboot:
+            post_reboot_delay: 10
+            test_command: whoami
+          when: rds_install.reboot_required
+
+        - name: Set RDS LicenseServer (regedit)
+          ansible.windows.win_regedit:
+            path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services
+            name: LicenseServers
+            data: "{{ RDS_LicenseServer }}"
+            type: string
+          when: RDS_Licensing
+
+        - name: Set RDS LicensingMode (regedit)
+          ansible.windows.win_regedit:
+            path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services
+            name: LicensingMode
+            data: "{{ RDS_LicensingMode }}"
+            type: dword
+          when: RDS_Licensing
+
+        - name: Set RDS fSingleSessionPerUser (regedit)
+          ansible.windows.win_regedit:
+            path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services
+            name: fSingleSessionPerUser
+            data: "{{ RDS_fSingleSessionPerUser }}"
+            type: dword
+          when: RDS_Licensing
+
+        - name: Set RDS MaxDisconnectionTime (regedit)
+          ansible.windows.win_regedit:
+            path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services
+            name: MaxDisconnectionTime
+            data: "{{ RDS_MaxDisconnectionTime }}"
+            type: dword
+          when: RDS_MaxDisconnectionTime >= 60000
+
+        - name: Set RDS RemoteAppLogoffTimeLimit (regedit)
+          ansible.windows.win_regedit:
+            path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services
+            name: RemoteAppLogoffTimeLimit
+            data: "{{ RDS_RemoteAppLogoffTimeLimit }}"
+            type: dword
+
+        - name: Generate tinkerd component config
+          ansible.windows.win_powershell:
+            script: |
+              tinkerd config --hostname {{ HOST_NAME }} --core_host {{ CORE_HOST }} --token {{ BOOTSTRAP_TOKEN }} --host_id {{ HOST_ID }} --ignore-verify-certs {{ IGNORE_VERIFY_CERTS }}
+
+        - name: Rename tinkerd keyfile
+          ansible.windows.win_powershell:
+            script: |
+              $source = "$env:USERPROFILE\AppData\Local\Programs\Tinker\data\keys\access_key"
+              $destination = "$env:USERPROFILE\AppData\Local\Programs\Tinker\data\keys\.access_key"
+              if (Test-Path $destination) {
+                $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+                  Rename-Item -Path $destination -NewName (Split-Path -Leaf "$destination.bak.$timestamp" )
+              }
+              if (Test-Path $source) {
+                  Rename-Item -Path $source -NewName (Split-Path -Leaf $destination)
+              }
+
+        - name: Install tinkerd service
+          ansible.windows.win_powershell:
+            script: |
+              tinkerd service install
+
+        - name: Start tinkerd service
+          ansible.windows.win_powershell:
+            script: |
+              tinkerd service start
+
+        - name: Wait Tinker api health
+          ansible.windows.win_uri:
+            url: http://localhost:6068/api/health/
+            status_code: 200
+            method: GET
+          register: _result
+          until: _result.status_code == 200
+          retries: 30
+          delay: 5
+
+        - name: Sync all remote applets
+          ansible.windows.win_powershell:
+            script: |
+              tinkerd install all
+              $exitCode = $LASTEXITCODE
+              if ($exitCode -ne 0) {
+                  Write-Output "Failed to install applets"
+                  Write-Output "Exit code: $exitCode"
+                  $Ansible.Failed = $true
+                  exit 1
+              }
+          register: sync_remote_applets
+          when: INSTALL_APPLETS
+
+      rescue:
+        - debug:
+            var: ansible_failed_result
+        - fail:
+            msg: "Failed to deploy applet host"

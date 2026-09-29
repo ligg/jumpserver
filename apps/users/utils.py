@@ -1,20 +1,25 @@
 # ~*~ coding: utf-8 ~*~
 #
-import os
-import re
-import pyotp
 import base64
 import logging
+import os
+import re
 import time
+from contextlib import contextmanager
+from urllib.parse import unquote
+import hashlib
 
+import pyotp
 from django.conf import settings
 from django.core.cache import cache
+from django.utils import translation
 
 from common.tasks import send_mail_async
-from common.utils import reverse, get_object_or_none, ip, pretty_string
+from common.utils import reverse, get_object_or_none, ip, safe_next_url
 from .models import User
 
-logger = logging.getLogger('jumpserver')
+logger = logging.getLogger('jumpserver.users')
+otp_digest = hashlib.sha256 if settings.OTP_DIGEST == 'sha256' else hashlib.sha1
 
 
 def send_user_created_mail(user):
@@ -46,19 +51,32 @@ def get_user_or_pre_auth_user(request):
 
 
 def redirect_user_first_login_or_index(request, redirect_field_name):
-    url = request.POST.get(redirect_field_name)
-    if not url:
-        url = request.GET.get(redirect_field_name)
+    sources = [request.session, request.POST, request.GET]
+
+    url = ''
+    for source in sources:
+        url = source.get(redirect_field_name)
+        if url:
+            break
+
+    # 处理下载地址编码问题 '%2Fui%2F'
+    url = unquote(url or '')
+
+    # URL 解码后再进行安全校验，避免编码后的外部地址绕过校验
+    url = safe_next_url(url, request=request)
+
     # 防止 next 地址为 None
     if not url or url.lower() in ['none']:
         url = reverse('index')
+
     return url
 
 
 def generate_otp_uri(username, otp_secret_key=None, issuer="JumpServer"):
     if otp_secret_key is None:
         otp_secret_key = base64.b32encode(os.urandom(10)).decode('utf-8')
-    totp = pyotp.TOTP(otp_secret_key)
+
+    totp = pyotp.TOTP(otp_secret_key, digest=otp_digest)
     otp_issuer_name = settings.OTP_ISSUER_NAME or issuer
     uri = totp.provisioning_uri(name=username, issuer_name=otp_issuer_name)
     return uri, otp_secret_key
@@ -67,7 +85,8 @@ def generate_otp_uri(username, otp_secret_key=None, issuer="JumpServer"):
 def check_otp_code(otp_secret_key, otp_code):
     if not otp_secret_key or not otp_code:
         return False
-    totp = pyotp.TOTP(otp_secret_key)
+
+    totp = pyotp.TOTP(otp_secret_key, digest=otp_digest)
     otp_valid_window = settings.OTP_VALID_WINDOW or 0
     return totp.verify(otp=otp_code, valid_window=otp_valid_window)
 
@@ -94,7 +113,7 @@ def check_password_rules(password, is_org_admin=False):
     if settings.SECURITY_PASSWORD_NUMBER:
         pattern += '(?=.*\d)'
     if settings.SECURITY_PASSWORD_SPECIAL_CHAR:
-        pattern += '(?=.*[`~!@#\$%\^&\*\(\)-=_\+\[\]\{\}\|;:\'\",\.<>\/\?])'
+        pattern += '(?=.*[`~!@#$%^&*()\-=_+\[\]{}|;:\'",.<>/?])'
     pattern += '[a-zA-Z\d`~!@#\$%\^&\*\(\)-=_\+\[\]\{\}\|;:\'\",\.<>\/\?]'
     if is_org_admin:
         min_length = settings.SECURITY_ADMIN_USER_PASSWORD_MIN_LENGTH
@@ -109,6 +128,7 @@ class BlockUtil:
     BLOCK_KEY_TMPL: str
 
     def __init__(self, username):
+        username = username.lower()
         self.block_key = self.BLOCK_KEY_TMPL.format(username)
         self.key_ttl = int(settings.SECURITY_LOGIN_LIMIT_TIME) * 60
 
@@ -124,9 +144,10 @@ class BlockUtilBase:
     BLOCK_KEY_TMPL: str
 
     def __init__(self, username, ip):
+        username = username.lower() if username else ''
         self.username = username
         self.ip = ip
-        self.limit_key = self.LIMIT_KEY_TMPL.format(username, ip)
+        self.limit_key = self.LIMIT_KEY_TMPL.format(username)
         self.block_key = self.BLOCK_KEY_TMPL.format(username)
         self.key_ttl = int(settings.SECURITY_LOGIN_LIMIT_TIME) * 60
 
@@ -157,6 +178,7 @@ class BlockUtilBase:
 
     @classmethod
     def unblock_user(cls, username):
+        username = username.lower()
         key_limit = cls.LIMIT_KEY_TMPL.format(username, '*')
         key_block = cls.BLOCK_KEY_TMPL.format(username)
         # Redis 尽量不要用通配
@@ -165,11 +187,22 @@ class BlockUtilBase:
 
     @classmethod
     def is_user_block(cls, username):
-        block_key = cls.BLOCK_KEY_TMPL.format(username)
+        block_key = cls.get_user_block_key(username)
         return bool(cache.get(block_key))
+
+    @classmethod
+    def get_user_block_key(cls, username):
+        username = username.lower()
+        return cls.BLOCK_KEY_TMPL.format(username)
 
     def is_block(self):
         return bool(cache.get(self.block_key))
+
+    @classmethod
+    def get_blocked_usernames(cls):
+        key = cls.BLOCK_KEY_TMPL.format('*')
+        keys = cache.keys(key)
+        return [k.split('_')[-1] for k in keys]
 
 
 class BlockGlobalIpUtilBase:
@@ -215,31 +248,59 @@ class BlockGlobalIpUtilBase:
 
 
 class LoginBlockUtil(BlockUtilBase):
-    LIMIT_KEY_TMPL = "_LOGIN_LIMIT_{}_{}"
+    LIMIT_KEY_TMPL = "_LOGIN_LIMIT_{}"
     BLOCK_KEY_TMPL = "_LOGIN_BLOCK_{}"
 
 
 class MFABlockUtils(BlockUtilBase):
-    LIMIT_KEY_TMPL = "_MFA_LIMIT_{}_{}"
+    LIMIT_KEY_TMPL = "_MFA_LIMIT_{}"
     BLOCK_KEY_TMPL = "_MFA_BLOCK_{}"
 
 
 class LoginIpBlockUtil(BlockGlobalIpUtilBase):
     LIMIT_KEY_TMPL = "_LOGIN_LIMIT_{}"
-    BLOCK_KEY_TMPL = "_LOGIN_BLOCK_{}"
+    BLOCK_KEY_TMPL = "_LOGIN_BLOCK_IP_{}"
+
+
+def validate_emails(emails):
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    for e in emails:
+        e = e or ''
+        if re.match(pattern, e):
+            return e
 
 
 def construct_user_email(username, email, email_suffix=''):
-    if email is None:
-        email = ''
-    if '@' in email:
-        return email
-    if '@' in username:
-        return username
-    if not email_suffix:
-        email_suffix = settings.EMAIL_SUFFIX
-    email = f'{username}@{email_suffix}'
-    return email
+    default = f'{username}@{email_suffix or settings.EMAIL_SUFFIX}'
+    emails = [email, username]
+    email = validate_emails(emails)
+    return email or default
+
+
+def flatten_dict(d, parent_key='', sep='.'):
+    items = {}
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.update(flatten_dict(v, new_key, sep=sep))
+        elif isinstance(v, list):
+            for i, item in enumerate(v):
+                if isinstance(item, dict):
+                    items.update(flatten_dict(item, f"{new_key}[{i}]", sep=sep))
+                else:
+                    items[f"{new_key}[{i}]"] = item
+        else:
+            items[new_key] = v
+    return items
+
+
+def map_attributes(default_profile, profile, attributes):
+    detail = default_profile
+    for local_name, remote_name in attributes.items():
+        value = profile.get(remote_name)
+        if value:
+            detail[local_name] = value
+    return detail
 
 
 def get_current_org_members():
@@ -270,3 +331,10 @@ def is_confirm_time_valid(session, key):
 
 def is_auth_confirm_time_valid(session):
     return is_confirm_time_valid(session, 'MFA_VERIFY_TIME')
+
+
+@contextmanager
+def activate_user_language(user):
+    language = getattr(user, 'lang') or settings.LANGUAGE_CODE
+    with translation.override(language):
+        yield

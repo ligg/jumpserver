@@ -1,11 +1,13 @@
+from django.template import Engine, TemplateSyntaxError
 from rest_framework import serializers
 
-from common.drf.serializers import BulkModelSerializer
+from common.serializers import BulkModelSerializer
 from notifications.models import SystemMsgSubscription, UserMsgSubscription
 
 
 class SystemMsgSubscriptionSerializer(BulkModelSerializer):
     receive_backends = serializers.ListField(child=serializers.CharField())
+    message_type_label = serializers.CharField(read_only=True)
 
     class Meta:
         model = SystemMsgSubscription
@@ -22,6 +24,10 @@ class SystemMsgSubscriptionSerializer(BulkModelSerializer):
             'receive_backends': {'required': True}
         }
 
+    def update(self, instance, validated_data):
+        instance.set_message_type_label()
+        return super().update(instance, validated_data)
+
 
 class SystemMsgSubscriptionByCategorySerializer(serializers.Serializer):
     category = serializers.CharField()
@@ -35,3 +41,17 @@ class UserMsgSubscriptionSerializer(BulkModelSerializer):
     class Meta:
         model = UserMsgSubscription
         fields = ('user_id', 'receive_backends',)
+
+
+class TemplateEditSerializer(serializers.Serializer):
+    template_name = serializers.CharField(max_length=256)
+    template_content = serializers.CharField()
+    render_html = serializers.CharField()
+
+    def validate_template_content(self, value):
+        safe_engine = Engine(debug=False, libraries={}, builtins=[])
+        try:
+            safe_engine.from_string(value)
+        except TemplateSyntaxError as e:
+            raise serializers.ValidationError(f'Template syntax error at: {e.token.lineno}')
+        return value

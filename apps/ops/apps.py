@@ -1,18 +1,19 @@
 from __future__ import unicode_literals
 
-from django.utils.translation import gettext_lazy as _
 from django.apps import AppConfig
+from django.utils.translation import gettext_lazy as _
 
 
 class OpsConfig(AppConfig):
     name = 'ops'
-    verbose_name = _('App ops')
+    verbose_name = _('App Ops')
 
     def ready(self):
         from orgs.models import Organization
         from orgs.utils import set_current_org
         set_current_org(Organization.root())
-        from .celery import signal_handler
-        from . import signal_handlers
-        from . import notifications
+        from .celery import signal_handler  # noqa
+        from . import signal_handlers  # noqa
+        from . import notifications  # noqa
+        from . import tasks  # noqa
         super().ready()

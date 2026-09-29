@@ -1,19 +1,12 @@
 from django.conf import settings
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
+from authentication.const import MFAType
+from common.serializers.fields import EncryptedField, LabeledChoiceField, ListMultipleChoiceField
 from common.utils import validate_ssh_public_key
-from common.drf.fields import EncryptedField
-from ..models import User
-
 from .user import UserSerializer
-
-
-class UserOrgSerializer(serializers.Serializer):
-    id = serializers.CharField()
-    name = serializers.CharField()
-    is_default = serializers.BooleanField(read_only=True)
-    is_root = serializers.BooleanField(read_only=True)
+from ..models import User, MFAMixin
 
 
 class UserUpdatePasswordSerializer(serializers.ModelSerializer):
@@ -56,89 +49,43 @@ class UserUpdatePasswordSerializer(serializers.ModelSerializer):
         return instance
 
 
-class UserUpdateSecretKeySerializer(serializers.ModelSerializer):
-    new_secret_key = EncryptedField(required=True, max_length=128)
-    new_secret_key_again = EncryptedField(required=True, max_length=128)
-
-    class Meta:
-        model = User
-        fields = ['new_secret_key', 'new_secret_key_again']
-
-    def validate(self, values):
-        new_secret_key = values.get('new_secret_key', '')
-        new_secret_key_again = values.get('new_secret_key_again', '')
-        if new_secret_key != new_secret_key_again:
-            msg = _('The newly set password is inconsistent')
-            raise serializers.ValidationError({'new_secret_key_again': msg})
-        return values
-
-    def update(self, instance, validated_data):
-        new_secret_key = self.validated_data.get('new_secret_key')
-        instance.secret_key = new_secret_key
-        instance.save()
-        return instance
-
-
-class UserUpdatePublicKeySerializer(serializers.ModelSerializer):
-    public_key_comment = serializers.CharField(
-        source='get_public_key_comment', required=False, read_only=True, max_length=128
-    )
-    public_key_hash_md5 = serializers.CharField(
-        source='get_public_key_hash_md5', required=False, read_only=True, max_length=128
-    )
-
-    class Meta:
-        model = User
-        fields = ['public_key_comment', 'public_key_hash_md5', 'public_key']
-        extra_kwargs = {
-            'public_key': {'required': True, 'write_only': True, 'max_length': 2048}
-        }
-
-    @staticmethod
-    def validate_public_key(value):
-        if not validate_ssh_public_key(value):
-            raise serializers.ValidationError(_('Not a valid ssh public key'))
-        return value
-
-    def update(self, instance, validated_data):
-        new_public_key = self.validated_data.get('public_key')
-        instance.set_public_key(new_public_key)
-        return instance
-
-
 class UserRoleSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=24)
     display = serializers.CharField(max_length=64)
 
 
 class UserProfileSerializer(UserSerializer):
-    MFA_LEVEL_CHOICES = (
-        (0, _('Disable')),
-        (1, _('Enable')),
+    # Declared on UserSerializer, so Meta.read_only_fields does not apply.
+    allowed_mfa_types = ListMultipleChoiceField(
+        choices=MFAType.choices,
+        required=False,
+        allow_empty=True,
+        read_only=True,
+        label=_("Allowed MFA types"),
+        help_text=_("Leave empty to inherit the global MFA methods"),
     )
-
     public_key_comment = serializers.CharField(
         source='get_public_key_comment', required=False, read_only=True, max_length=128
     )
     public_key_hash_md5 = serializers.CharField(
         source='get_public_key_hash_md5', required=False, read_only=True, max_length=128
     )
-    mfa_level = serializers.ChoiceField(choices=MFA_LEVEL_CHOICES, label=_('MFA'), required=False)
+    mfa_level = LabeledChoiceField(choices=MFAMixin.MFA_LEVEL_CHOICES, label=_("MFA"), required=False)
     guide_url = serializers.SerializerMethodField()
     receive_backends = serializers.ListField(child=serializers.CharField(), read_only=True)
-    console_orgs = UserOrgSerializer(many=True, read_only=True)
-    audit_orgs = UserOrgSerializer(many=True, read_only=True)
-    workbench_orgs = UserOrgSerializer(many=True, read_only=True)
-    perms = serializers.ListField(label=_("Perms"), read_only=True)
+    lang = serializers.SerializerMethodField(label=_("Language"))
 
     class Meta(UserSerializer.Meta):
         read_only_fields = [
             'date_joined', 'last_login', 'created_by', 'source',
-            'console_orgs', 'audit_orgs', 'workbench_orgs',
-            'receive_backends', 'perms',
+            'receive_backends', 'has_jdmc', 'allowed_mfa_types',
+        ]
+        fields_mini = [
+            'id', 'name', 'username', 'email',
         ]
         fields = UserSerializer.Meta.fields + [
             'public_key_comment', 'public_key_hash_md5', 'guide_url',
+            "wecom_id", "dingtalk_id", "feishu_id", "slack_id", 'lang', 'has_jdmc'
         ] + read_only_fields
 
         extra_kwargs = dict(UserSerializer.Meta.extra_kwargs)
@@ -164,12 +111,22 @@ class UserProfileSerializer(UserSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         system_roles_field = self.fields.get('system_roles')
+        if system_roles_field:
+            system_roles_field.read_only = True
         org_roles_field = self.fields.get('org_roles')
-        system_roles_field.read_only = True
-        org_roles_field.read_only = True
+        if org_roles_field:
+            org_roles_field.read_only = True
+
+        if settings.PRIVACY_MODE:
+            for field in (
+                    'phone', 'wechat',
+                    'wecom_id', 'dingtalk_id',
+                    'feishu_id', 'slack_id', 'lark_id'
+            ):
+                self.fields.pop(field, None)
 
     @staticmethod
-    def get_guide_url(obj):
+    def get_guide_url(obj) -> str:
         return settings.USER_GUIDE_URL
 
     def validate_mfa_level(self, mfa_level):
@@ -198,6 +155,9 @@ class UserProfileSerializer(UserSerializer):
             raise serializers.ValidationError(msg)
         return password
 
+    def get_lang(self, obj) -> str:
+        return getattr(obj, 'lang') or settings.LANGUAGE_CODE
+
 
 class UserPKUpdateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -219,6 +179,30 @@ class ChangeUserPasswordSerializer(serializers.ModelSerializer):
 
 class ResetOTPSerializer(serializers.Serializer):
     msg = serializers.CharField(read_only=True)
+
+    def create(self, validated_data):
+        pass
+
+    def update(self, instance, validated_data):
+        pass
+
+
+class UserOrgSerializer(serializers.Serializer):
+    id = serializers.CharField()
+    name = serializers.CharField()
+    is_default = serializers.BooleanField(read_only=True)
+    is_root = serializers.BooleanField(read_only=True)
+    is_system = serializers.BooleanField(read_only=True)
+
+
+class UserPermsSerializer(serializers.Serializer):
+    id = serializers.CharField(label=_("User ID"), read_only=True)
+    username = serializers.CharField(label=_("Username"), read_only=True)
+    pam_orgs = UserOrgSerializer(many=True, read_only=True)
+    console_orgs = UserOrgSerializer(many=True, read_only=True)
+    audit_orgs = UserOrgSerializer(many=True, read_only=True)
+    workbench_orgs = UserOrgSerializer(many=True, read_only=True)
+    perms = serializers.ListField(label=_("Perms"), read_only=True)
 
     def create(self, validated_data):
         pass

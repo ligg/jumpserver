@@ -1,13 +1,8 @@
 import os
-import platform
-
-if platform.system() == 'Darwin' and platform.machine() == 'arm64':
-    import pymysql
-
-    pymysql.version_info = (1, 4, 2, "final", 0)
-    pymysql.install_as_MySQLdb()
+import re
 
 from django.urls import reverse_lazy
+from redis.sentinel import SentinelManagedSSLConnection
 
 from .. import const
 from ..const import CONFIG
@@ -19,11 +14,24 @@ def exist_or_default(path, default):
     return path
 
 
+def parse_sentinels_host(sentinels_host):
+    service_name, sentinels = None, None
+    try:
+        service_name, hosts = sentinels_host.split('/', 1)
+        sentinels = [tuple(h.split(':', 1)) for h in hosts.split(',')]
+    except Exception:
+        pass
+    return service_name, sentinels
+
+
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 VERSION = const.VERSION
 BASE_DIR = const.BASE_DIR
 PROJECT_DIR = const.PROJECT_DIR
+APPS_DIR = os.path.join(PROJECT_DIR, 'apps')
 DATA_DIR = os.path.join(PROJECT_DIR, 'data')
+SHARE_DIR = os.path.join(DATA_DIR, 'share')
+ANSIBLE_DIR = os.path.join(SHARE_DIR, 'ansible')
 CERTS_DIR = os.path.join(DATA_DIR, 'certs')
 
 # Quick-start development settings - unsuitable for production
@@ -39,20 +47,80 @@ BOOTSTRAP_TOKEN = CONFIG.BOOTSTRAP_TOKEN
 DEBUG = CONFIG.DEBUG
 # SECURITY WARNING: If you run with debug turned on, more debug msg with be log
 DEBUG_DEV = CONFIG.DEBUG_DEV
+# SECURITY WARNING: If you run ansible task with debug turned on, more debug msg with be log
+DEBUG_ANSIBLE = CONFIG.DEBUG_ANSIBLE
 
 # Absolute url for some case, for example email link
 SITE_URL = CONFIG.SITE_URL
+
+# Absolute url for downloading applet
+APPLET_DOWNLOAD_HOST = CONFIG.APPLET_DOWNLOAD_HOST
 
 # https://docs.djangoproject.com/en/4.1/ref/settings/
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # LOG LEVEL
 LOG_LEVEL = CONFIG.LOG_LEVEL
+DOMAINS = CONFIG.DOMAINS or 'localhost'
+for name in ['SERVER_NAME', 'CORE_HOST']:
+    env = os.environ.get(name)
+    if not env:
+        continue
+    DOMAINS += ',{}'.format(env.replace(" ", ","))
+if CONFIG.SITE_URL:
+    DOMAINS += ',{}'.format(CONFIG.SITE_URL)
+
+ALLOWED_DOMAINS = DOMAINS.split(',') if DOMAINS else ['localhost:8080']
+ALLOWED_DOMAINS = [host.strip() for host in ALLOWED_DOMAINS]
+ALLOWED_DOMAINS = [host.replace('http://', '').replace('https://', '') for host in ALLOWED_DOMAINS if host]
+ALLOWED_DOMAINS = [host.split('/')[0] for host in ALLOWED_DOMAINS if host]
+ALLOWED_DOMAINS = [re.sub(':80$|:443$', '', host) for host in ALLOWED_DOMAINS]
+
+DEBUG_HOSTS = ('127.0.0.1', 'localhost', 'core')
+DEBUG_PORT = ['8080', '80', ]
+if DEBUG:
+    DEBUG_PORT.extend(['4200', '9528'])
+DEBUG_HOST_PORTS = ['{}:{}'.format(host, port) for host in DEBUG_HOSTS for port in DEBUG_PORT]
+ALLOWED_DOMAINS.extend(DEBUG_HOST_PORTS)
+
+# print("ALLOWED_HOSTS: ", )
+# for host in ALLOWED_DOMAINS:
+#     print('  - ' + host.lstrip('.'))
 
 ALLOWED_HOSTS = ['*']
 
+# https://docs.djangoproject.com/en/4.1/ref/settings/#std-setting-CSRF_TRUSTED_ORIGINS
+CSRF_TRUSTED_ORIGINS = []
+for host_port in ALLOWED_DOMAINS:
+    if '*' in ALLOWED_DOMAINS:
+        CSRF_TRUSTED_ORIGINS = ['http://*', 'https://*']
+        break
+    origin = host_port.strip('.')
+
+    if not origin:
+        continue
+
+    if origin.startswith('http'):
+        origin = origin.replace('http://', '').replace('https://', '')
+
+    host = origin.split(':')[0]
+    if host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(host)
+
+    is_local_origin = origin.split(':')[0] in DEBUG_HOSTS
+    for schema in ['https', 'http']:
+        if is_local_origin and schema == 'https':
+            continue
+        CSRF_TRUSTED_ORIGINS.append('{}://*.{}'.format(schema, origin))
+
+CORS_ALLOWED_ORIGINS = [o.replace('*.', '') for o in CSRF_TRUSTED_ORIGINS]
+CSRF_FAILURE_VIEW = 'jumpserver.views.other.csrf_failure'
+# print("CSRF_TRUSTED_ORIGINS: ")
+# for origin in CSRF_TRUSTED_ORIGINS:
+# print('  - ' + origin)
 # Max post update field num
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
+DATA_UPLOAD_MAX_MEMORY_SIZE = CONFIG.DATA_UPLOAD_MAX_MEMORY_SIZE
 
 # Application definition
 
@@ -60,27 +128,31 @@ INSTALLED_APPS = [
     'orgs.apps.OrgsConfig',
     'users.apps.UsersConfig',
     'assets.apps.AssetsConfig',
+    'accounts.apps.AccountsConfig',
     'perms.apps.PermsConfig',
     'ops.apps.OpsConfig',
     'settings.apps.SettingsConfig',
     'terminal.apps.TerminalConfig',
     'audits.apps.AuditsConfig',
+    'oauth2_provider',
     'authentication.apps.AuthenticationConfig',  # authentication
-    'applications.apps.ApplicationsConfig',
     'tickets.apps.TicketsConfig',
     'acls.apps.AclsConfig',
     'notifications.apps.NotificationsConfig',
     'rbac.apps.RBACConfig',
-    'common.apps.CommonConfig',
-    'jms_oidc_rp',
+    'labels.apps.LabelsConfig',
+    'reports.apps.ReportsConfig',
+    'chat_ai.apps.ChatAIConfig',
     'rest_framework',
-    'rest_framework_swagger',
-    'drf_yasg',
+    'drf_spectacular',
+    'drf_spectacular_sidecar', 
     'django_cas_ng',
     'channels',
     'django_filters',
     'bootstrap3',
     'captcha',
+    'corsheaders',
+    'private_storage',
     'django_celery_beat',
     'django.contrib.auth',
     'django.contrib.admin',
@@ -89,15 +161,23 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.forms',
+    'common.apps.CommonConfig',  # 这个放到内置的最后, django ready
     'simple_history',  # 这个要放到最后，别特么瞎改顺序
 ]
 
+PRE_CUSTOM_MIDDLEWARES = [m for m in CONFIG.PRE_CUSTOM_MIDDLEWARES.split(',') if m.strip()]
+POST_CUSTOM_MIDDLEWARES = [m for m in CONFIG.POST_CUSTOM_MIDDLEWARES.split(',') if m.strip()]
+
 MIDDLEWARE = [
+    'jumpserver.middleware.StartMiddleware',
+    *PRE_CUSTOM_MIDDLEWARES,
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.locale.LocaleMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
+    # 'django.middleware.csrf.CsrfViewMiddleware',
+    'jumpserver.middleware.CsrfCheckMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -105,6 +185,7 @@ MIDDLEWARE = [
     'jumpserver.middleware.DemoMiddleware',
     'jumpserver.middleware.RequestMiddleware',
     'jumpserver.middleware.RefererCheckMiddleware',
+    'jumpserver.middleware.SQLCountMiddleware',
     'orgs.middleware.OrgMiddleware',
     'authentication.backends.oidc.middleware.OIDCRefreshIDTokenMiddleware',
     'authentication.backends.cas.middleware.CASMiddleware',
@@ -112,7 +193,17 @@ MIDDLEWARE = [
     'authentication.middleware.ThirdPartyLoginMiddleware',
     'authentication.middleware.SessionCookieMiddleware',
     'simple_history.middleware.HistoryRequestMiddleware',
+    'jumpserver.middleware.SafeRedirectMiddleware',
+    *POST_CUSTOM_MIDDLEWARES,
+    'jumpserver.middleware.EndMiddleware',
 ]
+
+if DEBUG or DEBUG_DEV:
+    try:
+        import daphne  # noqa
+        INSTALLED_APPS.insert(0, 'daphne')
+    except ImportError:
+        pass
 
 ROOT_URLCONF = 'jumpserver.urls'
 
@@ -161,20 +252,24 @@ CSRF_COOKIE_NAME = '{}csrftoken'.format(SESSION_COOKIE_NAME_PREFIX)
 SESSION_COOKIE_NAME = '{}sessionid'.format(SESSION_COOKIE_NAME_PREFIX)
 
 SESSION_COOKIE_AGE = CONFIG.SESSION_COOKIE_AGE
-SESSION_EXPIRE_AT_BROWSER_CLOSE = True
-# 自定义的配置，SESSION_EXPIRE_AT_BROWSER_CLOSE 始终为 True, 下面这个来控制是否强制关闭后过期 cookie
-SESSION_EXPIRE_AT_BROWSER_CLOSE_FORCE = CONFIG.SESSION_EXPIRE_AT_BROWSER_CLOSE_FORCE
 SESSION_SAVE_EVERY_REQUEST = CONFIG.SESSION_SAVE_EVERY_REQUEST
-SESSION_ENGINE = "django.contrib.sessions.backends.{}".format(CONFIG.SESSION_ENGINE)
+SESSION_EXPIRE_AT_BROWSER_CLOSE = CONFIG.SESSION_EXPIRE_AT_BROWSER_CLOSE
+VIEW_ASSET_ONLINE_SESSION_INFO = CONFIG.VIEW_ASSET_ONLINE_SESSION_INFO
+SESSION_ENGINE = "common.sessions.{}".format(CONFIG.SESSION_ENGINE)
 
 MESSAGE_STORAGE = 'django.contrib.messages.storage.cookie.CookieStorage'
 # Database
 # https://docs.djangoproject.com/en/1.10/ref/settings/#databases
 
 DB_OPTIONS = {}
+DB_ENGINE = CONFIG.DB_ENGINE.lower()
+if DB_ENGINE == 'vastbase':
+    DB_BACKEND = 'django_vastbase_backend'
+else:
+    DB_BACKEND = f'django.db.backends.{DB_ENGINE}'
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.{}'.format(CONFIG.DB_ENGINE.lower()),
+        'ENGINE': DB_BACKEND,
         'NAME': CONFIG.DB_NAME,
         'HOST': CONFIG.DB_HOST,
         'PORT': CONFIG.DB_PORT,
@@ -185,13 +280,20 @@ DATABASES = {
     }
 }
 
-DB_CA_PATH = os.path.join(PROJECT_DIR, 'data', 'certs', 'db_ca.pem')
-DB_USE_SSL = False
-if CONFIG.DB_ENGINE.lower() == 'mysql':
+DB_USE_SSL = CONFIG.DB_USE_SSL
+if DB_ENGINE == 'mysql':
     DB_OPTIONS['init_command'] = "SET sql_mode='STRICT_TRANS_TABLES'"
-    if os.path.isfile(DB_CA_PATH):
-        DB_OPTIONS['ssl'] = {'ca': DB_CA_PATH}
-        DB_USE_SSL = True
+
+if DB_USE_SSL:
+    DB_CA_PATH = exist_or_default(os.path.join(CERTS_DIR, 'db_ca.pem'), None)
+
+    if DB_ENGINE == 'mysql':
+        DB_OPTIONS['ssl'] = {'ca': DB_CA_PATH }
+    elif DB_ENGINE == 'postgresql':
+        DB_OPTIONS.update({
+            'sslmode': 'require',
+            'sslrootcert': DB_CA_PATH,
+        })
 
 # Password validation
 # https://docs.djangoproject.com/en/1.10/ref/settings/#auth-password-validators
@@ -226,7 +328,7 @@ USE_TZ = True
 
 # I18N translation
 LOCALE_PATHS = [
-    os.path.join(BASE_DIR, 'locale'),
+    os.path.join(BASE_DIR, 'i18n', 'core'),
 ]
 
 # Static files (CSS, JavaScript, Images)
@@ -240,11 +342,16 @@ STATICFILES_DIRS = (
     os.path.join(BASE_DIR, "static"),
 )
 
-# Media files (File, ImageField) will be save these
-
+# Media files (File, ImageField) will be safe these
 MEDIA_URL = '/media/'
-
 MEDIA_ROOT = os.path.join(PROJECT_DIR, 'data', 'media').replace('\\', '/') + '/'
+
+PRIVATE_STORAGE_ROOT = MEDIA_ROOT
+PRIVATE_STORAGE_AUTH_FUNCTION = 'jumpserver.rewriting.storage.permissions.allow_access'
+PRIVATE_STORAGE_INTERNAL_URL = '/private-media/'
+PRIVATE_STORAGE_SERVER = 'jumpserver.rewriting.storage.servers.StaticFileServer'
+
+FILE_UPLOAD_TEMP_DIR = CONFIG.FILE_UPLOAD_TEMP_DIR
 
 # Use django-bootstrap-form to format template, input max width arg
 # BOOTSTRAP_COLUMN_COUNT = 11
@@ -253,6 +360,8 @@ MEDIA_ROOT = os.path.join(PROJECT_DIR, 'data', 'media').replace('\\', '/') + '/'
 FIXTURE_DIRS = [os.path.join(BASE_DIR, 'fixtures'), ]
 
 # Email config
+EMAIL_BACKEND = 'jumpserver.rewriting.smtp.EmailBackend'
+EMAIL_PROTOCOL = CONFIG.EMAIL_PROTOCOL
 EMAIL_HOST = CONFIG.EMAIL_HOST
 EMAIL_PORT = CONFIG.EMAIL_PORT
 EMAIL_HOST_USER = CONFIG.EMAIL_HOST_USER
@@ -261,6 +370,8 @@ EMAIL_FROM = CONFIG.EMAIL_FROM
 EMAIL_RECIPIENT = CONFIG.EMAIL_RECIPIENT
 EMAIL_USE_SSL = CONFIG.EMAIL_USE_SSL
 EMAIL_USE_TLS = CONFIG.EMAIL_USE_TLS
+EMAIL_CERT_VERIFY_MODE = CONFIG.EMAIL_CERT_VERIFY_MODE
+EMAIL_CACERT_CONTENT = CONFIG.EMAIL_CACERT_CONTENT
 
 # Custom User Auth model
 AUTH_USER_MODEL = 'users.User'
@@ -269,6 +380,9 @@ AUTH_USER_MODEL = 'users.User'
 FILE_UPLOAD_PERMISSIONS = 0o644
 FILE_UPLOAD_DIRECTORY_PERMISSIONS = 0o755
 
+X_FRAME_OPTIONS = CONFIG.X_FRAME_OPTIONS
+VERIFY_EXTERNAL_SSL = CONFIG.VERIFY_EXTERNAL_SSL
+
 # Cache use redis
 REDIS_SSL_KEY = exist_or_default(os.path.join(CERTS_DIR, 'redis_client.key'), None)
 REDIS_SSL_CERT = exist_or_default(os.path.join(CERTS_DIR, 'redis_client.crt'), None)
@@ -276,26 +390,68 @@ REDIS_SSL_CA = exist_or_default(os.path.join(CERTS_DIR, 'redis_ca.pem'), None)
 REDIS_SSL_CA = exist_or_default(os.path.join(CERTS_DIR, 'redis_ca.crt'), REDIS_SSL_CA)
 REDIS_SSL_REQUIRED = 'none'
 REDIS_USE_SSL = CONFIG.REDIS_USE_SSL
+REDIS_PROTOCOL = 'rediss' if REDIS_USE_SSL else 'redis'
+# Cache use sentinel
+REDIS_SENTINEL_HOSTS = CONFIG.REDIS_SENTINEL_HOSTS
+REDIS_SENTINEL_SERVICE_NAME, REDIS_SENTINELS = parse_sentinels_host(REDIS_SENTINEL_HOSTS)
+REDIS_SENTINEL_PASSWORD = CONFIG.REDIS_SENTINEL_PASSWORD
+if CONFIG.REDIS_SENTINEL_SOCKET_TIMEOUT:
+    REDIS_SENTINEL_SOCKET_TIMEOUT = float(CONFIG.REDIS_SENTINEL_SOCKET_TIMEOUT)
+else:
+    REDIS_SENTINEL_SOCKET_TIMEOUT = None
 
-REDIS_LOCATION_NO_DB = '%(protocol)s://:%(password)s@%(host)s:%(port)s/{}' % {
-    'protocol': 'rediss' if REDIS_USE_SSL else 'redis',
-    'password': CONFIG.REDIS_PASSWORD,
-    'host': CONFIG.REDIS_HOST,
-    'port': CONFIG.REDIS_PORT,
+# Cache config
+
+REDIS_OPTIONS = {
+    "REDIS_CLIENT_KWARGS": {
+        "health_check_interval": 30
+    },
+    "CONNECTION_POOL_KWARGS": {
+        'max_connections': CONFIG.REDIS_MAX_CONNECTIONS,
+    }
 }
+if REDIS_USE_SSL:
+    REDIS_OPTIONS['CONNECTION_POOL_KWARGS'].update({
+        'ssl_cert_reqs': REDIS_SSL_REQUIRED,
+        "ssl_keyfile": REDIS_SSL_KEY,
+        "ssl_certfile": REDIS_SSL_CERT,
+        "ssl_ca_certs": REDIS_SSL_CA
+    })
+
+if REDIS_SENTINEL_SERVICE_NAME and REDIS_SENTINELS:
+    REDIS_LOCATION_NO_DB = "%(protocol)s://%(service_name)s/{}" % {
+        'protocol': REDIS_PROTOCOL, 'service_name': REDIS_SENTINEL_SERVICE_NAME,
+    }
+    REDIS_OPTIONS.update({
+        'CLIENT_CLASS': 'django_redis.client.SentinelClient',
+        'SENTINELS': REDIS_SENTINELS, 'PASSWORD': CONFIG.REDIS_PASSWORD,
+        'SENTINEL_KWARGS': {
+            'ssl': REDIS_USE_SSL,
+            'ssl_cert_reqs': REDIS_SSL_REQUIRED,
+            "ssl_keyfile": REDIS_SSL_KEY,
+            "ssl_certfile": REDIS_SSL_CERT,
+            "ssl_ca_certs": REDIS_SSL_CA,
+            'password': REDIS_SENTINEL_PASSWORD,
+            'socket_timeout': REDIS_SENTINEL_SOCKET_TIMEOUT
+        }
+    })
+    if REDIS_USE_SSL:
+        CONNECTION_POOL_KWARGS = REDIS_OPTIONS['CONNECTION_POOL_KWARGS']
+        CONNECTION_POOL_KWARGS['connection_class'] = SentinelManagedSSLConnection
+        REDIS_OPTIONS['CONNECTION_POOL_KWARGS'] = CONNECTION_POOL_KWARGS
+    DJANGO_REDIS_CONNECTION_FACTORY = 'django_redis.pool.SentinelConnectionFactory'
+else:
+    REDIS_LOCATION_NO_DB = '%(protocol)s://:%(password)s@%(host)s:%(port)s/{}' % {
+        'protocol': REDIS_PROTOCOL,
+        'password': CONFIG.REDIS_PASSWORD_QUOTE,
+        'host': CONFIG.REDIS_HOST,
+        'port': CONFIG.REDIS_PORT,
+    }
 
 REDIS_CACHE_DEFAULT = {
     'BACKEND': 'redis_lock.django_cache.RedisCache',
     'LOCATION': REDIS_LOCATION_NO_DB.format(CONFIG.REDIS_DB_CACHE),
-    'OPTIONS': {
-        "REDIS_CLIENT_KWARGS": {"health_check_interval": 30},
-        "CONNECTION_POOL_KWARGS": {
-            'ssl_cert_reqs': REDIS_SSL_REQUIRED,
-            "ssl_keyfile": REDIS_SSL_KEY,
-            "ssl_certfile": REDIS_SSL_CERT,
-            "ssl_ca_certs": REDIS_SSL_CA
-        } if REDIS_USE_SSL else {}
-    }
+    'OPTIONS': REDIS_OPTIONS
 }
 REDIS_CACHE_SESSION = dict(REDIS_CACHE_DEFAULT)
 REDIS_CACHE_SESSION['LOCATION'] = REDIS_LOCATION_NO_DB.format(CONFIG.REDIS_DB_SESSION)
@@ -319,7 +475,6 @@ PASSWORD_HASHERS = [
     'django.contrib.auth.hashers.BCryptSHA256PasswordHasher',
 ]
 
-
 GMSSL_ENABLED = CONFIG.GMSSL_ENABLED
 GM_HASHER = 'common.hashers.PBKDF2SM3PasswordHasher'
 if GMSSL_ENABLED:
@@ -335,4 +490,3 @@ if os.environ.get('DEBUG_TOOLBAR', False):
     DEBUG_TOOLBAR_PANELS = [
         'debug_toolbar.panels.profiling.ProfilingPanel',
     ]
-

@@ -1,0 +1,43 @@
+#
+from django.http import HttpResponse
+from django.utils.decorators import method_decorator
+from django.utils.translation import gettext_lazy as _
+from django.views.decorators.cache import never_cache
+from django.views.generic.base import TemplateView
+
+from common.utils import bulk_get, FlashMessageUtil, safe_next_url
+
+
+@method_decorator(never_cache, name='dispatch')
+class FlashMessageMsgView(TemplateView):
+    template_name = 'flash_message_standalone.html'
+
+    def get(self, request, *args, **kwargs):
+        code = request.GET.get('code')
+        if not code:
+            return HttpResponse(_('Not found the code'))
+
+        message_data = FlashMessageUtil.get_message_by_code(code)
+        if not message_data:
+            return HttpResponse(_('The message code provided is invalid or has expired'))
+
+        items = ('title', 'message', 'error', 'redirect_url', 'confirm_button', 'cancel_url')
+        title, msg, error, redirect_url, confirm_btn, cancel_url = bulk_get(message_data, items)
+        redirect_url = safe_next_url(redirect_url, request=request)
+        cancel_url = safe_next_url(cancel_url, request=request)
+
+        interval = message_data.get('interval', 3)
+        auto_redirect = message_data.get('auto_redirect', True)
+        has_cancel = message_data.get('has_cancel', False)
+        context = {
+            'title': title,
+            'message': msg,
+            'error': error,
+            'interval': interval,
+            'redirect_url': redirect_url,
+            'auto_redirect': auto_redirect,
+            'confirm_button': confirm_btn,
+            'has_cancel': has_cancel,
+            'cancel_url': cancel_url,
+        }
+        return self.render_to_response(context)

@@ -1,5 +1,5 @@
-from ..hands import *
 from .base import BaseService
+from ..hands import *
 
 __all__ = ['GunicornService']
 
@@ -7,7 +7,7 @@ __all__ = ['GunicornService']
 class GunicornService(BaseService):
 
     def __init__(self, **kwargs):
-        self.worker = kwargs['worker_gunicorn']
+        self.worker = kwargs.get('worker', 2)
         super().__init__(**kwargs)
 
     @property
@@ -16,13 +16,15 @@ class GunicornService(BaseService):
 
         log_format = '%(h)s %(t)s %(L)ss "%(r)s" %(s)s %(b)s '
         bind = f'{HTTP_HOST}:{HTTP_PORT}'
+
         cmd = [
-            'gunicorn', 'jumpserver.wsgi',
+            'gunicorn', 'jumpserver.asgi:application',
             '-b', bind,
-            '-k', 'gthread',
-            '--threads', '10',
+            '-k', 'uvicorn.workers.UvicornWorker',
             '-w', str(self.worker),
-            '--max-requests', '4096',
+            '--max-requests', '10240',
+            '--max-requests-jitter', '2048',
+            '--graceful-timeout', '30',
             '--access-logformat', log_format,
             '--access-logfile', '-'
         ]

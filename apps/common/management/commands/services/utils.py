@@ -26,7 +26,7 @@ class ServicesUtil(object):
 
     def start_and_watch(self):
         logging.info(time.ctime())
-        logging.info(f'JumpServer version {__version__}, more see https://www.jumpserver.org')
+        logging.info(f'JumpServer version {__version__}, more see https://www.jumpserver.com')
         self.start()
         if self.run_daemon:
             self.show_status()
@@ -40,7 +40,8 @@ class ServicesUtil(object):
             service: BaseService
             service.start()
             self.files_preserve_map[service.name] = service.log_file
-            time.sleep(1)
+
+        time.sleep(1)
 
     def stop(self):
         for service in self._services:
@@ -76,7 +77,6 @@ class ServicesUtil(object):
     def clean_up(self):
         if not self.EXIT_EVENT.is_set():
             self.EXIT_EVENT.set()
-
         self.stop()
 
     def show_status(self):

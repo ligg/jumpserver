@@ -1,41 +1,58 @@
 # -*- coding: utf-8 -*-
 #
 
-import os
-import subprocess
 import datetime
+from itertools import chain
 
 from celery import shared_task
 from celery.utils.log import get_task_logger
-from django.utils import timezone
 from django.core.files.storage import default_storage
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
-from common.utils import get_log_keep_day
+from common.storage.replay import ReplayStorageHandler
 from ops.celery.decorator import (
-    register_as_period_task, after_app_ready_start, after_app_shutdown_clean_periodic
-)
-from .models import Status, Session, Command, Task
+    register_as_period_task, after_app_ready_start)
+from orgs.utils import tmp_to_builtin_org
+from orgs.utils import tmp_to_root_org
 from .backends import server_replay_storage
-from .utils import find_session_replay_local
+from .const import ReplayStorageType, CommandStorageType
+from .models import (
+    Status, Session, Task, AppletHostDeployment,
+    AppletHost, AppProviderDeployment, ReplayStorage, CommandStorage
+)
+from .notifications import StorageConnectivityMessage
 
 CACHE_REFRESH_INTERVAL = 10
 RUNNING = False
 logger = get_task_logger(__name__)
 
 
-@shared_task
+class AppProviderDeploymentError(RuntimeError):
+    """Deployment failure whose details are already included in the task log."""
+
+
+@shared_task(
+    verbose_name=_('Periodic delete terminal status'),
+    description=_("Unused")
+)
 @register_as_period_task(interval=3600)
 @after_app_ready_start
-@after_app_shutdown_clean_periodic
 def delete_terminal_status_period():
     yesterday = timezone.now() - datetime.timedelta(days=7)
     Status.objects.filter(date_created__lt=yesterday).delete()
 
 
-@shared_task
+@shared_task(
+    verbose_name=_('Clean orphan session'),
+    description=_(
+        """Check every 10 minutes for asset connection sessions that have been inactive for 3 
+        minutes and mark these sessions as completed"""
+    )
+)
 @register_as_period_task(interval=600)
 @after_app_ready_start
-@after_app_shutdown_clean_periodic
+@tmp_to_root_org()
 def clean_orphan_session():
     active_sessions = Session.objects.filter(is_finished=False)
     for session in active_sessions:
@@ -51,51 +68,206 @@ def clean_orphan_session():
         session.save()
 
 
-@shared_task
-@register_as_period_task(interval=3600*24)
-@after_app_ready_start
-@after_app_shutdown_clean_periodic
-def clean_expired_session_period():
-    logger.info("Start clean expired session record, commands and replay")
-    days = get_log_keep_day('TERMINAL_SESSION_KEEP_DURATION')
-    expire_date = timezone.now() - timezone.timedelta(days=days)
-    expired_sessions = Session.objects.filter(date_start__lt=expire_date)
-    timestamp = expire_date.timestamp()
-    expired_commands = Command.objects.filter(timestamp__lt=timestamp)
-    replay_dir = os.path.join(default_storage.base_location, 'replay')
-
-    expired_sessions.delete()
-    logger.info("Clean session item done")
-    expired_commands.delete()
-    logger.info("Clean session command done")
-    command = "find %s -mtime +%s \\( -name '*.json' -o -name '*.tar' -o -name '*.gz' \\) -exec rm -f {} \\;" % (
-        replay_dir, days
+@shared_task(
+    verbose_name=_('Upload session replay to external storage'),
+    description=_(
+        """If SERVER_REPLAY_STORAGE is configured in the config.txt, session commands and 
+        recordings will be uploaded to external storage"""
     )
-    subprocess.call(command, shell=True)
-    command = "find %s -type d -empty -delete;" % replay_dir
-    subprocess.call(command, shell=True)
-    logger.info("Clean session replay done")
-
-
-@shared_task
+)
 def upload_session_replay_to_external_storage(session_id):
     logger.info(f'Start upload session to external storage: {session_id}')
     session = Session.objects.filter(id=session_id).first()
     if not session:
         logger.error(f'Session db item not found: {session_id}')
         return
-    local_path, foobar = find_session_replay_local(session)
+
+    replay_storage = ReplayStorageHandler(session)
+    local_path, url = replay_storage.find_local()
     if not local_path:
         logger.error(f'Session replay not found, may be upload error: {local_path}')
         return
+
     abs_path = default_storage.path(local_path)
     remote_path = session.get_relative_path_by_local_path(abs_path)
     ok, err = server_replay_storage.upload(abs_path, remote_path)
     if not ok:
         logger.error(f'Session replay upload to external error: {err}')
         return
+
     try:
         default_storage.delete(local_path)
     except:
         pass
     return
+
+
+@shared_task(
+    verbose_name=_('Upload session replay part file to external storage'),
+    description=_(
+        """If SERVER_REPLAY_STORAGE is configured in the config.txt, session commands and 
+        recordings will be uploaded to external storage"""
+    ))
+def upload_session_replay_file_to_external_storage(session_id, local_path, remote_path):
+    abs_path = default_storage.path(local_path)
+    ok, err = server_replay_storage.upload(abs_path, remote_path)
+    if not ok:
+        logger.error(f'Session replay file {local_path} upload to external error: {err}')
+        return
+
+    try:
+        default_storage.delete(local_path)
+    except:
+        pass
+    return
+
+
+
+@shared_task(
+    verbose_name=_('Run applet host deployment'),
+    activity_callback=lambda self, did, *args, **kwargs: ([did],),
+    description=_(
+        """When deploying from the remote application publisher details page, and the 'Deploy' 
+        button is clicked, this task will be executed"""
+    )
+)
+def run_applet_host_deployment(did, install_applets):
+    with tmp_to_builtin_org(system=1):
+        deployment = AppletHostDeployment.objects.get(id=did)
+        deployment.start(install_applets=install_applets)
+
+
+@shared_task(
+    verbose_name=_('Run app provider deployment'),
+    activity_callback=lambda self, did, *args, **kwargs: ([did],),
+    description=_('Deploy the Panda runtime on an application provider host'),
+    soft_time_limit=1860, time_limit=1920,
+    throws=(AppProviderDeploymentError,),
+)
+def run_app_provider_deployment(did):
+    with tmp_to_builtin_org(system=1):
+        claimed = AppProviderDeployment.objects.filter(pk=did, status='pending').update(
+            status='running', date_start=timezone.now(), date_updated=timezone.now(),
+        )
+        if not claimed:
+            return
+        deployment = AppProviderDeployment.objects.get(id=did)
+        deployment.start()
+        if deployment.status != 'success':
+            raise AppProviderDeploymentError('Application provider deployment failed; see the Ansible task log')
+
+
+@shared_task(
+    verbose_name=_('Publish all virtual apps'),
+    activity_callback=lambda self, ids, *args, **kwargs: (ids,),
+    description=_('Publish all virtual applications on an application provider'),
+    throws=(AppProviderDeploymentError,),
+)
+def run_app_provider_deployments(ids):
+    with tmp_to_builtin_org(system=1):
+        deployments = AppProviderDeployment.objects.filter(id__in=ids).select_related(
+            'provider', 'publication', 'publication__app'
+        )
+        deployments_by_id = {str(item.id): item for item in deployments}
+        failed = []
+        for deployment_id in ids:
+            deployment = deployments_by_id.get(str(deployment_id))
+            if not deployment:
+                continue
+            claimed = AppProviderDeployment.objects.filter(pk=deployment.pk, status='pending').update(
+                status='running', date_start=timezone.now(), date_updated=timezone.now(),
+            )
+            if not claimed:
+                continue
+            deployment.start()
+            if deployment.status != 'success':
+                failed.append(str(deployment.pk))
+        if failed:
+            raise AppProviderDeploymentError('Virtual application publication failed: ' + ', '.join(failed))
+
+
+@shared_task(
+    verbose_name=_('Install applet'),
+    activity_callback=lambda self, ids, applet_id, *args, **kwargs: (ids,),
+    description=_(
+        """When the 'Deploy' button is clicked in the 'Remote Application' section of the remote 
+        application publisher details page, this task will be executed"""
+    )
+)
+def run_applet_host_deployment_install_applet(ids, applet_id):
+    with tmp_to_builtin_org(system=1):
+        for did in ids:
+            deployment = AppletHostDeployment.objects.get(id=did)
+            deployment.install_applet(applet_id)
+
+
+@shared_task(
+    verbose_name=_('Uninstall applet'),
+    activity_callback=lambda self, ids, applet_id, *args, **kwargs: (ids,),
+    description=_(
+        """When the 'Uninstall' button is clicked in the 'Remote Application' section of the 
+        remote application publisher details page, this task will be executed"""
+    )
+)
+def run_applet_host_deployment_uninstall_applet(ids, applet_id):
+    with tmp_to_builtin_org(system=1):
+        for did in ids:
+            deployment = AppletHostDeployment.objects.get(id=did)
+            deployment.uninstall_applet(applet_id)
+
+
+@shared_task(
+    verbose_name=_('Generate applet host accounts'),
+    activity_callback=lambda self, host_id, *args, **kwargs: ([host_id],),
+    description=_(
+        """When a remote publishing server is created and an account needs to be created 
+        automatically, this task will be executed"""
+    )
+)
+def applet_host_generate_accounts(host_id):
+    applet_host = AppletHost.objects.filter(id=host_id).first()
+    if not applet_host:
+        return
+
+    with tmp_to_builtin_org(system=1):
+        applet_host.generate_accounts()
+
+
+@shared_task(
+    verbose_name=_('Check command replay storage connectivity'),
+    description=_(
+        """Check every day at midnight whether the external storage for commands and recordings 
+        is accessible. If it is not accessible, send a notification to the recipients specified 
+        in 'System Settings - Notifications - Subscription - Storage - Connectivity'"""
+    )
+)
+@register_as_period_task(crontab='0 0 * * *')
+@tmp_to_root_org()
+def check_command_replay_storage_connectivity():
+    errors = []
+    replays = ReplayStorage.objects.exclude(
+        type__in=[ReplayStorageType.server, ReplayStorageType.null]
+    )
+    commands = CommandStorage.objects.exclude(
+        type__in=[CommandStorageType.server, CommandStorageType.null]
+    )
+
+    for instance in chain(replays, commands):
+        msg = None
+        try:
+            is_valid = instance.is_valid()
+        except Exception as e:
+            is_valid = False
+            msg = _("Test failure: {}".format(str(e)))
+        if is_valid:
+            continue
+        errors.append({
+            'msg': msg or _("Test failure: Account invalid"),
+            'type': instance.get_type_display(),
+            'name': instance.name
+        })
+
+    if not errors:
+        return
+
+    StorageConnectivityMessage(errors).publish_async()

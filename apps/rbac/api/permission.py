@@ -1,9 +1,9 @@
-from rest_framework.response import Response
-from rest_framework.decorators import action
 from django.shortcuts import get_object_or_404
+from rest_framework.decorators import action
+from rest_framework.response import Response
 
+from common.api import JMSModelViewSet
 from common.tree import TreeNodeSerializer
-from common.drf.api import JMSModelViewSet
 from ..models import Permission, Role
 from ..serializers import PermissionSerializer
 
@@ -11,6 +11,7 @@ __all__ = ['PermissionViewSet']
 
 
 class PermissionViewSet(JMSModelViewSet):
+    queryset = Permission.objects.none()
     filterset_fields = ['codename']
     serializer_classes = {
         'get_tree': TreeNodeSerializer,

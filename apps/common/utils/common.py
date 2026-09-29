@@ -1,21 +1,28 @@
 # -*- coding: utf-8 -*-
 #
+import datetime
+import ipaddress
+import logging
+import os
+import platform
 import re
 import socket
-from django.templatetags.static import static
-from collections import OrderedDict
-from itertools import chain
-import logging
-import datetime
-import uuid
-from functools import wraps
+import textwrap
 import time
-import ipaddress
-import psutil
-import platform
-import os
+import uuid
+import hmac
+import hashlib
+from collections import OrderedDict
+from functools import wraps, cached_property
+from itertools import chain
 
+from bs4 import BeautifulSoup
+from markdownify import markdownify
+import psutil
 from django.conf import settings
+from django.templatetags.static import static
+
+from common.permissions import ServiceAccountSignaturePermission
 
 UUID_PATTERN = re.compile(r'\w{8}(-\w{4}){3}-\w{12}')
 ipip_db = None
@@ -76,6 +83,7 @@ def setattr_bulk(seq, key, value):
     def set_attr(obj):
         setattr(obj, key, value)
         return obj
+
     return map(set_attr, seq)
 
 
@@ -97,12 +105,12 @@ def capacity_convert(size, expect='auto', rate=1000):
     rate_mapping = (
         ('K', rate),
         ('KB', rate),
-        ('M', rate**2),
-        ('MB', rate**2),
-        ('G', rate**3),
-        ('GB', rate**3),
-        ('T', rate**4),
-        ('TB', rate**4),
+        ('M', rate ** 2),
+        ('MB', rate ** 2),
+        ('G', rate ** 3),
+        ('GB', rate ** 3),
+        ('T', rate ** 4),
+        ('TB', rate ** 4),
     )
 
     rate_mapping = OrderedDict(rate_mapping)
@@ -117,7 +125,7 @@ def capacity_convert(size, expect='auto', rate=1000):
 
     if expect == 'auto':
         for unit, rate_ in rate_mapping.items():
-            if rate > std_size/rate_ >= 1 or unit == "T":
+            if rate > std_size / rate_ >= 1 or unit == "T":
                 expect = unit
                 break
 
@@ -152,10 +160,52 @@ def is_uuid(seq):
 
 
 def get_request_ip(request):
-    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')
+    if settings.TRUSTED_IP_VERIFY_ENABLED:
+        login_ip = get_trusted_request_ip(request)
+    else:
+        login_ip = get_common_request_ip(request)
+    return login_ip
 
+
+def get_trusted_request_ip(request):
+    trusted_ip = request.headers.get(settings.TRUSTED_IP_SOURCE_HEADER, '')
+    if not trusted_ip:
+        logger.warning(
+            f"Trusted IP verification enabled but no source header '{settings.TRUSTED_IP_SOURCE_HEADER}' "
+            f"found in request."
+        )
+        return '0.0.0.0'
+
+    signature_header_name = settings.TRUSTED_IP_SIGN_HEADER
+    received_signature = request.headers.get(signature_header_name, '')
+    if not received_signature:
+        logger.warning(
+            f"Trusted IP verification enabled but no signature header '{signature_header_name}' "
+            f"found in request."
+        )
+        return '0.0.0.0'
+
+    sign_key = settings.TRUSTED_IP_SIGN_KEY or os.environ.get('HMAC_SIGN_KEY', '')
+    expected_signature = hmac.new(
+        sign_key.encode(), trusted_ip.encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected_signature.lower(), received_signature.lower()):
+        logger.warning(
+            f"Trusted IP verification failed. Expected signature: {expected_signature}, "
+            f"Received signature: {received_signature}."
+        )
+        return '0.0.0.0'
+
+    return trusted_ip
+
+
+def get_common_request_ip(request):
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')
     if x_forwarded_for and x_forwarded_for[0]:
         login_ip = x_forwarded_for[0]
+        if login_ip.count(':') == 1:
+            # format: ipv4:port (非标准格式的 X-Forwarded-For)
+            login_ip = login_ip.split(":")[0]
     else:
         login_ip = request.META.get('REMOTE_ADDR', '')
     return login_ip
@@ -163,8 +213,11 @@ def get_request_ip(request):
 
 def get_request_ip_or_data(request):
     ip = ''
-    if hasattr(request, 'data'):
-        ip = request.data.get('remote_addr', '')
+
+    if hasattr(request, 'data') and isinstance(request.data, dict) and request.data.get('remote_addr', ''):
+        permission = ServiceAccountSignaturePermission()
+        if permission.has_permission(request, None):
+            ip = request.data.get('remote_addr', '')
     ip = ip or get_request_ip(request)
     return ip
 
@@ -195,6 +248,7 @@ def with_cache(func):
         res = func(*args, **kwargs)
         cache[key] = res
         return res
+
     return wrapper
 
 
@@ -213,9 +267,10 @@ def timeit(func):
         now = time.time()
         result = func(*args, **kwargs)
         using = (time.time() - now) * 1000
-        msg = "End call {}, using: {:.1f}ms".format(name, using)
+        msg = "Ends  call: {}, using: {:.1f}ms".format(name, using)
         logger.debug(msg)
         return result
+
     return wrapper
 
 
@@ -234,17 +289,19 @@ def dict_get_any(d, keys):
     return None
 
 
-class lazyproperty:
-    def __init__(self, func):
-        self.func = func
+# class lazyproperty:
+#     def __init__(self, func):
+#         self.func = func
 
-    def __get__(self, instance, cls):
-        if instance is None:
-            return self
-        else:
-            value = self.func(instance)
-            setattr(instance, self.func.__name__, value)
-            return value
+#     def __get__(self, instance, cls):
+#         if instance is None:
+#             return self
+#         else:
+#             value = self.func(instance)
+#             setattr(instance, self.func.__name__, value)
+#             return value
+
+lazyproperty = cached_property
 
 
 def get_disk_usage(path):
@@ -284,7 +341,7 @@ def get_docker_mem_usage_if_limit():
             inactive_file = int(inactive_file)
         return ((usage_in_bytes - inactive_file) / limit_in_bytes) * 100
 
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -310,7 +367,7 @@ class Time:
     def print(self):
         last, *timestamps = self._timestamps
         for timestamp, msg in zip(timestamps, self._msgs):
-            logger.debug(f'TIME_IT: {msg} {timestamp-last}')
+            logger.debug(f'TIME_IT: {msg} {timestamp - last}')
             last = timestamp
 
 
@@ -344,7 +401,7 @@ def get_file_by_arch(dir, filename):
     return file_path
 
 
-def pretty_string(data: str, max_length=128, ellipsis_str='...'):
+def pretty_string(data, max_length=128, ellipsis_str='...'):
     """
     params:
        data: abcdefgh
@@ -353,6 +410,7 @@ def pretty_string(data: str, max_length=128, ellipsis_str='...'):
    return:
        ab...gh
     """
+    data = str(data)
     if len(data) < max_length:
         return data
     remain_length = max_length - len(ellipsis_str)
@@ -366,7 +424,7 @@ def pretty_string(data: str, max_length=128, ellipsis_str='...'):
 
 
 def group_by_count(it, count):
-    return [it[i:i+count] for i in range(0, len(it), count)]
+    return [it[i:i + count] for i in range(0, len(it), count)]
 
 
 def test_ip_connectivity(host, port, timeout=0.5):
@@ -389,3 +447,73 @@ def static_or_direct(logo_path):
         return static(logo_path)
     else:
         return logo_path
+
+
+def make_dirs(name, mode=0o755, exist_ok=False):
+    """ 默认权限设置为 0o755 """
+    return os.makedirs(name, mode=mode, exist_ok=exist_ok)
+
+
+def distinct(seq, key=None):
+    if key is None:
+        # 如果未提供关键字参数，则默认使用元素本身作为比较键
+        key = lambda x: x
+    seen = set()
+    result = []
+    for item in seq:
+        k = key(item)
+        if k not in seen:
+            seen.add(k)
+            result.append(item)
+    return result
+
+
+def is_macos():
+    return platform.system() == 'Darwin'
+
+
+def convert_html_to_markdown(html_str, **options):
+    markdown = markdownify(html_str, **options)
+    markdown = markdown.replace('\n\n', '\n')
+    markdown = markdown.replace('\n ', '\n')
+    return markdown
+
+
+def convert_html_to_text(html_str, body_width=90):
+    soup = BeautifulSoup(html_str or '', 'html.parser')
+
+    for tag in soup(['script', 'style']):
+        tag.decompose()
+
+    text = soup.get_text(separator='\n', strip=True)
+    text = text.replace('\xa0', ' ')
+    lines = [line.strip() for line in text.splitlines()]
+
+    wrapped_lines = []
+    for line in lines:
+        if not line:
+            if wrapped_lines and wrapped_lines[-1] != '':
+                wrapped_lines.append('')
+            continue
+        wrapped = textwrap.fill(line, width=body_width) if body_width else line
+        wrapped_lines.append(wrapped)
+
+    return '\n'.join(wrapped_lines).strip()
+
+
+def many_get(d, keys, default=None):
+    res = [d.get(key, default) for key in keys]
+    return res
+
+
+def text_hmac_sha256(text: str, secret_key: str = None):
+    if secret_key is None:
+        secret_key = settings.SECRET_KEY
+    try:
+        msg = text.strip().lower().encode('utf-8')
+        key = secret_key.encode("utf-8")
+        digest = hmac.new(key, msg, hashlib.sha256).hexdigest()  # 64位十六进制字符串
+    except Exception as e:
+        logger.error(f"Failed to hmac hash text: {text}, error: {e}")
+        digest = ''
+    return digest

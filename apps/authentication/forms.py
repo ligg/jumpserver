@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 #
+from captcha.fields import CaptchaField, CaptchaTextInput
 from django import forms
 from django.conf import settings
-from django.utils.translation import ugettext_lazy as _
-from captcha.fields import CaptchaField, CaptchaTextInput
+from django.utils.translation import gettext_lazy as _
 
-from common.utils import get_logger, decrypt_password
+from common.utils import get_logger, decrypt_session_password
 
 logger = get_logger(__name__)
 
@@ -13,14 +13,10 @@ logger = get_logger(__name__)
 class EncryptedField(forms.CharField):
     def to_python(self, value):
         value = super().to_python(value)
-        return decrypt_password(value)
+        return decrypt_session_password(value)
 
 
 class UserLoginForm(forms.Form):
-    days_auto_login = int(settings.SESSION_COOKIE_AGE / 3600 / 24)
-    disable_days_auto_login = settings.SESSION_EXPIRE_AT_BROWSER_CLOSE_FORCE \
-                              or days_auto_login < 1
-
     username = forms.CharField(
         label=_('Username'), max_length=100,
         widget=forms.TextInput(attrs={
@@ -34,15 +30,15 @@ class UserLoginForm(forms.Form):
     )
     auto_login = forms.BooleanField(
         required=False, initial=False,
-        widget=forms.CheckboxInput(
-            attrs={'disabled': disable_days_auto_login}
-        )
+        widget=forms.CheckboxInput(),
+        label=_('Auto-login')
     )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         auto_login_field = self.fields['auto_login']
-        auto_login_field.label = _("{} days auto login").format(self.days_auto_login or 1)
+        if settings.SESSION_EXPIRE_AT_BROWSER_CLOSE:
+            auto_login_field.widget = forms.HiddenInput()
 
     def confirm_login_allowed(self, user):
         if not user.is_staff:
@@ -62,7 +58,7 @@ class CustomCaptchaTextInput(CaptchaTextInput):
 
 
 class CaptchaMixin(forms.Form):
-    captcha = CaptchaField(widget=CustomCaptchaTextInput)
+    captcha = CaptchaField(widget=CustomCaptchaTextInput, label=_('Captcha'))
 
 
 class ChallengeMixin(forms.Form):

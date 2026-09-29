@@ -1,21 +1,24 @@
 # ~*~ coding: utf-8 ~*~
-import time
+import os
 
+from django.conf import settings
+from django.contrib.auth import logout as auth_logout
+from django.http.response import HttpResponseRedirect
+from django.shortcuts import redirect
+from django.templatetags.static import static
 from django.urls import reverse
-from django.utils.translation import ugettext as _
+from django.utils._os import safe_join
+from django.utils.translation import gettext as _
 from django.views.generic.base import TemplateView
 from django.views.generic.edit import FormView
-from django.contrib.auth import logout as auth_logout
-from django.shortcuts import redirect
-from django.http.response import HttpResponseRedirect
 
-from authentication.mixins import AuthMixin
-from authentication.mfa import MFAOtp, otp_failed_msg
+from authentication.const import MFAType, OTP_BIND_AFTER_MFA_SESSION_KEY
 from authentication.errors import SessionEmptyError
-from common.utils import get_logger, FlashMessageUtil
-from common.mixins.views import PermissionsMixin
+from authentication.mfa import MFAOtp, otp_failed_msg
+from authentication.mixins import AuthMixin
 from common.permissions import IsValidUser
-from .password import UserVerifyPasswordView
+from common.utils import get_logger, FlashMessageUtil
+from common.views.mixins import PermissionsMixin
 from ... import forms
 from ...utils import (
     generate_otp_uri, check_otp_code,
@@ -32,29 +35,98 @@ __all__ = [
 logger = get_logger(__name__)
 
 
-class UserOtpEnableStartView(AuthMixin, TemplateView):
+class OTPBindMFACheckMixin(AuthMixin):
+    @staticmethod
+    def _is_request_user_authenticated(request):
+        user = getattr(request, 'user', None)
+        return bool(user and user.is_authenticated)
+
+    @staticmethod
+    def _has_active_mfa_except_otp(user):
+        return any(
+            backend.name != MFAType.OTP.value
+            for backend in user.active_mfa_backends
+        )
+
+    def _need_mfa_before_otp_bind(self, user):
+        if self.request.session.get('auth_mfa'):
+            return False
+        if self._is_request_user_authenticated(self.request) and \
+                not self.request.session.get('auth_mfa_required'):
+            return False
+        return self._has_active_mfa_except_otp(user)
+
+    def _get_login_mfa_url(self):
+        url = reverse('authentication:login-mfa')
+        query_string = self.request.GET.urlencode()
+        if query_string:
+            url = f'{url}?{query_string}'
+        return url
+
+    def _pre_check_need_mfa_for_otp_bind(self, user):
+        if not self._need_mfa_before_otp_bind(user):
+            return None
+
+        self.request.session[OTP_BIND_AFTER_MFA_SESSION_KEY] = 1
+        return HttpResponseRedirect(self._get_login_mfa_url())
+
+
+class UserOtpEnableStartView(OTPBindMFACheckMixin, TemplateView):
     template_name = 'users/user_otp_check_password.html'
 
     def get(self, request, *args, **kwargs):
         try:
-            self.get_user_from_session()
+            user = self.get_user_from_session()
         except SessionEmptyError:
             url = reverse('authentication:login') + '?_=otp_enable_start'
             return redirect(url)
+
+        pre_response = self._pre_check_need_mfa_for_otp_bind(user)
+        if pre_response:
+            return pre_response
         return super().get(request, *args, **kwargs)
 
 
-class UserOtpEnableInstallAppView(TemplateView):
+class UserOtpEnableInstallAppView(OTPBindMFACheckMixin, TemplateView):
     template_name = 'users/user_otp_enable_install_app.html'
+
+    def get(self, request, *args, **kwargs):
+        try:
+            user = self.get_user_from_session()
+        except SessionEmptyError as e:
+            verify_url = reverse('authentication:user-otp-enable-start') + f'?e={e}'
+            return HttpResponseRedirect(verify_url)
+
+        pre_response = self._pre_check_need_mfa_for_otp_bind(user)
+        if pre_response:
+            return pre_response
+        return super().get(request, *args, **kwargs)
+
+    @staticmethod
+    def replace_authenticator_png(platform):
+        media_url = settings.MEDIA_URL
+        base_path = f'img/authenticator_{platform}.png'
+        authenticator_media_path = safe_join(settings.MEDIA_ROOT, base_path)
+        if os.path.exists(authenticator_media_path):
+            authenticator_url = f'{media_url}{base_path}'
+        else:
+            authenticator_url = static(base_path)
+        return authenticator_url
 
     def get_context_data(self, **kwargs):
         user = get_user_or_pre_auth_user(self.request)
-        context = {'user': user}
+        authenticator_android_url = self.replace_authenticator_png('android')
+        authenticator_iphone_url = self.replace_authenticator_png('iphone')
+        context = {
+            'user': user,
+            'authenticator_android_url': authenticator_android_url,
+            'authenticator_iphone_url': authenticator_iphone_url
+        }
         kwargs.update(context)
         return super().get_context_data(**kwargs)
 
 
-class UserOtpEnableBindView(AuthMixin, TemplateView, FormView):
+class UserOtpEnableBindView(OTPBindMFACheckMixin, TemplateView, FormView):
     template_name = 'users/user_otp_enable_bind.html'
     form_class = forms.UserCheckOtpCodeForm
 
@@ -79,6 +151,9 @@ class UserOtpEnableBindView(AuthMixin, TemplateView, FormView):
 
         if user.otp_secret_key:
             return self.has_already_bound_message()
+        pre_response = self._pre_check_need_mfa_for_otp_bind(user)
+        if pre_response:
+            return pre_response
         return None
 
     @staticmethod
@@ -168,5 +243,3 @@ class UserOtpDisableView(PermissionsMixin, FormView):
         }
         url = FlashMessageUtil.gen_message_url(message_data)
         return url
-
-

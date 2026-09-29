@@ -3,7 +3,7 @@
 
 from django.db.models import F
 
-from common.drf.api import JMSBulkRelationModelViewSet
+from common.api import JMSBulkRelationModelViewSet
 from .. import serializers
 from ..models import User, UserGroup
 
@@ -14,8 +14,12 @@ class UserUserGroupRelationViewSet(JMSBulkRelationModelViewSet):
     perm_model = UserGroup
     filterset_fields = ('user', 'usergroup')
     search_fields = filterset_fields
-    serializer_class = serializers.UserUserGroupRelationSerializer
+    serializer_class = serializers.User2GroupRelationSerializer
     m2m_field = User.groups.field
+    rbac_perms = {
+        'create': 'users.change_usergroup',
+        'bulk_destroy': 'users.change_usergroup',
+    }
 
     def get_queryset(self):
         return super().get_queryset().annotate(

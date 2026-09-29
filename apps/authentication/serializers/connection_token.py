@@ -1,194 +1,117 @@
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
-from django.utils.translation import ugettext_lazy as _
+from accounts.utils import validate_account_username
+from common.utils import get_request_ip
+from common.serializers import CommonModelSerializer
+from common.serializers.fields import EncryptedField
+from perms.serializers.permission import ActionChoicesField
+from ..models import ConnectionToken, AdminConnectionToken
 from orgs.mixins.serializers import OrgResourceModelSerializerMixin
-from authentication.models import ConnectionToken
-from common.utils import pretty_string
-from common.utils.random import random_string
-from assets.models import Asset, SystemUser, Gateway, Domain, CommandFilterRule
-from users.models import User
-from applications.models import Application
-from assets.serializers import ProtocolsField
-from perms.serializers.base import ActionsField
-
 
 __all__ = [
-    'ConnectionTokenSerializer', 'ConnectionTokenSecretSerializer',
-    'SuperConnectionTokenSerializer', 'ConnectionTokenDisplaySerializer'
+    'ConnectionTokenSerializer', 'SuperConnectionTokenSerializer',
+    'ConnectionTokenReusableSerializer', 'AdminConnectionTokenSerializer',
 ]
 
 
 class ConnectionTokenSerializer(OrgResourceModelSerializerMixin):
-    type_display = serializers.ReadOnlyField(source='get_type_display', label=_("Type display"))
-    is_valid = serializers.BooleanField(read_only=True, label=_('Validity'))
     expire_time = serializers.IntegerField(read_only=True, label=_('Expired time'))
+    input_secret = EncryptedField(
+        label=_("Input secret"), max_length=40960, required=False, allow_blank=True
+    )
+    from_ticket_info = serializers.SerializerMethodField(label=_("Ticket info"))
+    actions = ActionChoicesField(read_only=True, label=_("Actions"))
+    save_personal_credential = serializers.BooleanField(
+        required=False, default=False, write_only=True,
+        label=_("Save personal credential"),
+    )
+    personal_credential_version = serializers.IntegerField(
+        required=False, min_value=1, write_only=True,
+        label=_("Personal credential version"),
+    )
 
     class Meta:
         model = ConnectionToken
-        fields_mini = ['id', 'type']
+        fields_mini = ['id', 'value']
         fields_small = fields_mini + [
-            'secret', 'date_expired', 'date_created', 'date_updated',
-            'created_by', 'updated_by', 'org_id', 'org_name',
-        ]
-        fields_fk = [
-            'user', 'system_user', 'asset', 'application',
+            'user', 'asset', 'account', 'input_username', 'input_secret', 'input_secret_type',
+            'personal_credential_id', 'personal_credential_version',
+            'save_personal_credential',
+            'connect_method', 'connect_options', 'protocol', 'actions',
+            'is_active', 'is_reusable', 'from_ticket', 'from_ticket_info',
+            'date_expired', 'date_created', 'date_updated', 'created_by',
+            'updated_by', 'org_id', 'org_name', 'face_monitor_token',
+            'remote_addr',
         ]
         read_only_fields = [
             # 普通 Token 不支持指定 user
-            'user', 'is_valid', 'expire_time',
-            'type_display', 'user_display', 'system_user_display',
-            'asset_display', 'application_display',
+            'user', 'expire_time', 'is_expired', 'date_expired',
+            'user_display', 'asset_display',
         ]
-        fields = fields_small + fields_fk + read_only_fields
+        fields = fields_small + read_only_fields
+        extra_kwargs = {
+            'face_monitor_token': {'read_only': True},
+            'personal_credential_id': {'required': False, 'allow_null': True},
+            'from_ticket': {'read_only': True},
+            'value': {'read_only': True},
+            'is_expired': {'read_only': True, 'label': _('Is expired')},
+            'org_name': {'label': _("Org name")},
+        }
 
-    def validate(self, attrs):
-        fields_attrs = self.construct_internal_fields_attrs(attrs)
-        attrs.update(fields_attrs)
-        return attrs
+    def get_request_user(self):
+        request = self.context.get('request')
+        user = request.user if request else None
+        return user
 
-    @property
-    def request_user(self):
+    def get_user(self, attrs):
+        return self.get_request_user()
+
+    @staticmethod
+    def validate_input_username(value):
+        return validate_account_username(value)
+
+    def create(self, validated_data):
         request = self.context.get('request')
         if request:
-            return request.user
+            validated_data['remote_addr'] = get_request_ip(request)
+        return super().create(validated_data)
 
-    def get_user(self, attrs):
-        return self.request_user
-
-    def construct_internal_fields_attrs(self, attrs):
-        user = self.get_user(attrs)
-        system_user = attrs.get('system_user') or ''
-        asset = attrs.get('asset') or ''
-        application = attrs.get('application') or ''
-        secret = attrs.get('secret') or random_string(16)
-        date_expired = attrs.get('date_expired') or ConnectionToken.get_default_date_expired()
-
-        if isinstance(asset, Asset):
-            tp = ConnectionToken.Type.asset
-            org_id = asset.org_id
-        elif isinstance(application, Application):
-            tp = ConnectionToken.Type.application
-            org_id = application.org_id
-        else:
-            raise serializers.ValidationError(_('Asset or application required'))
-
-        return {
-            'type': tp,
-            'user': user,
-            'secret': secret,
-            'date_expired': date_expired,
-            'user_display': pretty_string(str(user), max_length=128),
-            'system_user_display': pretty_string(str(system_user), max_length=128),
-            'asset_display': pretty_string(str(asset), max_length=128),
-            'application_display': pretty_string(str(application), max_length=128),
-            'org_id': org_id,
-        }
+    def get_from_ticket_info(self, instance) -> dict:
+        if not instance.from_ticket:
+            return {}
+        user = self.get_request_user()
+        info = instance.from_ticket.get_extra_info_of_review(user=user)
+        return info
 
 
-class ConnectionTokenDisplaySerializer(ConnectionTokenSerializer):
-    class Meta(ConnectionTokenSerializer.Meta):
-        extra_kwargs = {
-            'secret': {'write_only': True},
-        }
-
-
-#
-# SuperConnectionTokenSerializer
-#
-
-
-class SuperConnectionTokenSerializer(ConnectionTokenSerializer):
-
-    class Meta(ConnectionTokenSerializer.Meta):
-        read_only_fields = [
-            'validity', 'user_display', 'system_user_display',
-            'asset_display', 'application_display',
-        ]
-
-    def get_user(self, attrs):
-        return attrs.get('user') or self.request_user
-
-
-#
-# Connection Token Secret
-#
-
-
-class ConnectionTokenUserSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ['id', 'name', 'username', 'email']
-
-
-class ConnectionTokenAssetSerializer(serializers.ModelSerializer):
-    protocols = ProtocolsField(label='Protocols', read_only=True)
-
-    class Meta:
-        model = Asset
-        fields = ['id', 'hostname', 'ip', 'protocols', 'org_id']
-
-
-class ConnectionTokenSystemUserSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SystemUser
-        fields = [
-            'id', 'name', 'username', 'password', 'private_key',
-            'protocol', 'ad_domain', 'org_id'
-        ]
-
-
-class ConnectionTokenGatewaySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Gateway
-        fields = ['id', 'ip', 'port', 'username', 'password', 'private_key']
-
-
-class ConnectionTokenRemoteAppSerializer(serializers.Serializer):
-    program = serializers.CharField(allow_null=True, allow_blank=True)
-    working_directory = serializers.CharField(allow_null=True, allow_blank=True)
-    parameters = serializers.CharField(allow_null=True, allow_blank=True)
-
-
-class ConnectionTokenApplicationSerializer(serializers.ModelSerializer):
-    attrs = serializers.JSONField(read_only=True)
-
-    class Meta:
-        model = Application
-        fields = ['id', 'name', 'category', 'type', 'attrs', 'org_id']
-
-
-class ConnectionTokenDomainSerializer(serializers.ModelSerializer):
-    gateways = ConnectionTokenGatewaySerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Domain
-        fields = ['id', 'name', 'gateways']
-
-
-class ConnectionTokenCmdFilterRuleSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CommandFilterRule
-        fields = [
-            'id', 'type', 'content', 'ignore_case', 'pattern',
-            'priority', 'action', 'date_created',
-        ]
-
-
-class ConnectionTokenSecretSerializer(OrgResourceModelSerializerMixin):
-    user = ConnectionTokenUserSerializer(read_only=True)
-    asset = ConnectionTokenAssetSerializer(read_only=True, source='asset_or_remote_app_asset')
-    application = ConnectionTokenApplicationSerializer(read_only=True)
-    remote_app = ConnectionTokenRemoteAppSerializer(read_only=True)
-    system_user = ConnectionTokenSystemUserSerializer(read_only=True)
-    gateway = ConnectionTokenGatewaySerializer(read_only=True)
-    domain = ConnectionTokenDomainSerializer(read_only=True)
-    cmd_filter_rules = ConnectionTokenCmdFilterRuleSerializer(many=True)
-    actions = ActionsField()
-    expired_at = serializers.IntegerField()
+class ConnectionTokenReusableSerializer(CommonModelSerializer):
+    def validate_is_reusable(self, value):
+        if (
+                value
+                and self.instance
+                and self.instance.personal_credential_id
+        ):
+            raise serializers.ValidationError(
+                _('Personal credential connection tokens cannot be reusable')
+            )
+        return value
 
     class Meta:
         model = ConnectionToken
-        fields = [
-            'id', 'secret', 'type', 'user', 'asset', 'application', 'system_user',
-            'remote_app', 'cmd_filter_rules', 'domain', 'gateway', 'actions', 'expired_at',
-        ]
+        fields = ['id', 'date_expired', 'is_reusable']
+        can_update_fields = ['is_reusable']
+        read_only_fields = list(set(fields) - set(can_update_fields))
+
+
+class SuperConnectionTokenSerializer(ConnectionTokenSerializer):
+    class Meta(ConnectionTokenSerializer.Meta):
+        read_only_fields = list(set(ConnectionTokenSerializer.Meta.read_only_fields) - {'user'})
+
+    def get_user(self, attrs):
+        return attrs.get('user')
+
+
+class AdminConnectionTokenSerializer(ConnectionTokenSerializer):
+    class Meta(ConnectionTokenSerializer.Meta):
+        model = AdminConnectionToken

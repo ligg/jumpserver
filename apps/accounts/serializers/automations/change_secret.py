@@ -1,0 +1,238 @@
+# -*- coding: utf-8 -*-
+#
+from django.utils.translation import gettext_lazy as _
+from rest_framework import serializers
+
+from accounts.const import (
+    AutomationTypes, SecretType, SecretStrategy,
+    SSHKeyStrategy, ChangeSecretRecordStatusChoice
+)
+from accounts.models import (
+    Account, ChangeSecretAutomation,
+    ChangeSecretRecord, AutomationExecution
+)
+from accounts.serializers import AuthValidateMixin, PasswordRulesSerializer
+from assets.models import Asset
+from common.serializers import SecretReadableCheckMixin
+from common.serializers.fields import LabeledChoiceField, ObjectRelatedField
+from common.utils import get_logger
+from .base import BaseAutomationSerializer, AutomationListSerializerMixin
+from ...utils import account_secret_task_status
+
+logger = get_logger(__file__)
+
+__all__ = [
+    'ChangeSecretAutomationSerializer',
+    'ChangeSecretAutomationListSerializer',
+    'ChangeSecretRecordSerializer',
+    'ChangeSecretRecordViewSecretSerializer',
+    'ChangeSecretRecordBackUpSerializer',
+    'ChangeSecretUpdateAssetSerializer',
+    'ChangeSecretUpdateNodeSerializer',
+    'ChangeSecretAccountSerializer'
+]
+
+
+def get_secret_types():
+    return [
+        (SecretType.PASSWORD, _('Password')),
+        (SecretType.SSH_KEY, _('SSH key')),
+    ]
+
+
+class ChangeSecretAutomationSerializer(AuthValidateMixin, BaseAutomationSerializer):
+    secret_strategy = LabeledChoiceField(
+        choices=SecretStrategy.choices, required=True, label=_('Secret strategy')
+    )
+    ssh_key_change_strategy = LabeledChoiceField(
+        choices=SSHKeyStrategy.choices, required=False, label=_('SSH Key strategy'),
+        default=SSHKeyStrategy.set_jms
+    )
+    password_rules = PasswordRulesSerializer(required=False, label=_('Password rules'))
+    secret_type = LabeledChoiceField(choices=get_secret_types(), required=True, label=_('Secret type'))
+
+    class Meta:
+        model = ChangeSecretAutomation
+        read_only_fields = BaseAutomationSerializer.Meta.read_only_fields
+        fields = BaseAutomationSerializer.Meta.fields + read_only_fields + [
+            'secret_type', 'secret_strategy', 'secret', 'password_rules',
+            'ssh_key_change_strategy', 'passphrase', 'recipients', 'params', 'check_conn_after_change'
+        ]
+        extra_kwargs = {**BaseAutomationSerializer.Meta.extra_kwargs, **{
+            'accounts': {'required': True, 'help_text': _('Please enter your account username')},
+            'recipients': {'label': _('Recipient'), 'help_text': _(
+                "Currently only mail sending is supported"
+            )},
+            'pre_recipients': {'help_text': _("Notification before execution")},
+            'params': {'help_text': _(
+                "Secret parameter settings, currently only effective for assets of the host type."
+            )},
+        }}
+
+    @property
+    def model_type(self):
+        return AutomationTypes.change_secret
+
+    def validate_password_rules(self, password_rules):
+        secret_type = self.initial_data.get(
+            'secret_type',
+            getattr(self.instance, 'secret_type', None),
+        )
+        if secret_type != SecretType.PASSWORD:
+            return password_rules
+
+        if self.initial_data.get('secret_strategy') == SecretStrategy.custom:
+            return password_rules
+
+        length = password_rules.get('length')
+
+        try:
+            length = int(length)
+        except Exception as e:
+            logger.error(e)
+            msg = _("* Please enter the correct password length")
+            raise serializers.ValidationError(msg)
+
+        if length < 8 or length > 36:
+            msg = _('* Password length range 8-36 bits')
+            raise serializers.ValidationError(msg)
+
+        return password_rules
+
+    def validate(self, attrs):
+        secret_type = attrs.get(
+            'secret_type',
+            getattr(self.instance, 'secret_type', None),
+        )
+        secret_strategy = attrs.get(
+            'secret_strategy',
+            getattr(self.instance, 'secret_strategy', None),
+        )
+        if secret_strategy == SecretStrategy.custom:
+            secret = attrs.get(
+                'secret',
+                getattr(self.instance, 'secret', None),
+            )
+            if not secret:
+                raise serializers.ValidationError({
+                    'secret': _('Secret is required for the custom strategy')
+                })
+
+        if secret_type == SecretType.PASSWORD:
+            attrs.pop('ssh_key_change_strategy', None)
+            if secret_strategy == SecretStrategy.custom:
+                attrs.pop('password_rules', None)
+            else:
+                attrs.pop('secret', None)
+        elif secret_type == SecretType.SSH_KEY:
+            attrs.pop('password_rules', None)
+            if secret_strategy != SecretStrategy.custom:
+                attrs.pop('secret', None)
+        return attrs
+
+
+class ChangeSecretAutomationListSerializer(AutomationListSerializerMixin, ChangeSecretAutomationSerializer):
+    class Meta(ChangeSecretAutomationSerializer.Meta):
+        relation_count_fields = {'assets_amount': 'assets', 'nodes_amount': 'nodes'}
+        fields = [
+            f for f in ChangeSecretAutomationSerializer.Meta.fields
+            if f not in ('assets', 'nodes', 'recipients')
+        ] + ['assets_amount', 'nodes_amount']
+
+
+class ChangeSecretRecordSerializer(serializers.ModelSerializer):
+    is_success = serializers.SerializerMethodField(label=_('Is success'))
+    asset = ObjectRelatedField(queryset=Asset.objects, label=_('Asset'))
+    account = ObjectRelatedField(
+        queryset=Account.objects, label=_('Account'),
+        attrs=("id", "name", "username")
+    )
+    execution = ObjectRelatedField(
+        queryset=AutomationExecution.objects, label=_('Automation task execution')
+    )
+
+    class Meta:
+        model = ChangeSecretRecord
+        fields = [
+            'id', 'asset', 'account', 'date_finished',
+            'status', 'is_success', 'error', 'execution',
+            'verification_status', 'verification_error', 'date_verified',
+        ]
+        read_only_fields = fields
+
+    @staticmethod
+    def get_is_success(obj) -> bool:
+        return obj.status == ChangeSecretRecordStatusChoice.success
+
+
+class ChangeSecretRecordViewSecretSerializer(SecretReadableCheckMixin, serializers.ModelSerializer):
+    class Meta:
+        model = ChangeSecretRecord
+        fields = [
+            'id', 'old_secret', 'new_secret',
+        ]
+        secret_fields = ['old_secret', 'new_secret']
+        read_only_fields = fields
+
+
+class ChangeSecretRecordBackUpSerializer(serializers.ModelSerializer):
+    asset = serializers.SerializerMethodField(label=_('Asset'))
+    account = serializers.SerializerMethodField(label=_('Account'))
+    is_success = serializers.SerializerMethodField(label=_('Is success'))
+
+    class Meta:
+        model = ChangeSecretRecord
+        fields = [
+            'id', 'asset', 'account', 'old_secret', 'new_secret',
+            'status', 'error', 'is_success'
+        ]
+        read_only_fields = fields
+
+    @staticmethod
+    def get_asset(instance) -> str:
+        return str(instance.asset)
+
+    @staticmethod
+    def get_account(instance):
+        return str(instance.account)
+
+    @staticmethod
+    def get_is_success(obj) -> str:
+        if obj.status == ChangeSecretRecordStatusChoice.success.value:
+            return _("Success")
+        if obj.status == ChangeSecretRecordStatusChoice.unverified.value:
+            return _("Unverified")
+        return _("Failed")
+
+
+class ChangeSecretUpdateAssetSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ChangeSecretAutomation
+        fields = ['id', 'assets']
+
+
+class ChangeSecretUpdateNodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ChangeSecretAutomation
+        fields = ['id', 'nodes']
+
+
+class ChangeSecretAccountSerializer(serializers.ModelSerializer):
+    asset = ObjectRelatedField(
+        queryset=Asset.objects.all(), required=False, label=_("Asset")
+    )
+    ttl = serializers.SerializerMethodField(label=_('TTL'))
+    meta = serializers.SerializerMethodField(label=_('Meta'))
+
+    class Meta:
+        model = Account
+        fields = ['id', 'username', 'asset', 'meta', 'ttl']
+        read_only_fields = fields
+
+    @staticmethod
+    def get_meta(obj) -> dict:
+        return account_secret_task_status.get(str(obj.id))
+
+    @staticmethod
+    def get_ttl(obj) -> int:
+        return account_secret_task_status.get_ttl(str(obj.id))

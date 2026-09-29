@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 from django.db.models import TextChoices
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 TICKET_DETAIL_URL = '/ui/#/tickets/tickets/{id}'
 
@@ -17,3 +17,74 @@ class SystemOrOrgRole(TextChoices):
 class PasswordStrategy(TextChoices):
     email = 'email', _('Reset link will be generated and sent to the user')
     custom = 'custom', _('Set password')
+
+
+class RDPResolution(TextChoices):
+    AUTO = 'auto', _('AUTO')
+    RES_1024x768 = '1024x768', '1024x768'
+    RES_1366x768 = '1366x768', '1366x768'
+    RES_1600x900 = '1600x900', '1600x900'
+    RES_1920x1080 = '1920x1080', '1920x1080'
+
+
+class RDPClientOption(TextChoices):
+    FULL_SCREEN = 'full_screen', _('Full screen')
+    MULTI_SCREEN = 'multi_screen', _('Multi screen')
+    DRIVES_REDIRECT = 'drives_redirect', _('Drives redirect')
+    REMOTE_MICROPHONE = 'remote_microphone', _('Remote microphone')
+
+
+class ConnectDefaultOpenMethod(TextChoices):
+    CURRENT = 'current', _('Current window')
+    NEW = 'new', _('New window')
+
+
+class Themes(TextChoices):
+    DEFAULT = 'default', _('Default')
+    DARKGARY = 'darkGary', _('Dark gray')
+    DEEKBLUE = 'deepBlue', _('Deep blue')
+
+
+class RDPSmartSize(TextChoices):
+    DISABLE = '0', _('Disable')
+    ENABLE = '1', _('Enable')
+
+
+class RDPColorQuality(TextChoices):
+    HIGH = '32', _('High（32 bit）')
+    TRUE_COLOR  = '24', _('True Color（24 bit）')
+    MEDIUM = '16', _('Medium（16 bit）')
+
+
+class KeyboardLayout(TextChoices):
+    EN_US_QWERTY = 'en-us-qwerty', 'US English (Qwerty)'
+    EN_UK_QWERTY = 'en-gb-qwerty', 'UK English (Qwerty)'
+    JA_JP_QWERTY = 'ja-jp-qwerty', 'Japanese (Qwerty)'
+    FR_FR_AZERTY = 'fr-fr-azerty', 'French (Azerty)'
+    FR_CH_QWERTZ = 'fr-ch-qwertz', 'Swiss French (Qwertz)'
+    FR_BE_AZERTY = 'fr-be-azerty', 'Belgian French (Azerty)'
+    TR_TR_QWERTY = 'tr-tr-qwerty', 'Turkish-Q (Qwerty)'
+    ES_ES_QWERTY = 'es-es-qwerty', 'Spanish'
+    ES_LATAM_QWERTY = 'es-latam-qwerty', 'Spanish (Latin American)'
+    DE_DE_QWERTZ = 'de-de-qwertz', 'German (Qwertz)'
+    DE_CH_QWERTZ = 'de-ch-qwertz', 'Swiss German (Qwertz)'
+    SV_SE_QWERTY = 'sv-se-qwerty', 'Swedish (Qwerty)'
+    IT_IT_QWERTY = 'it-it-qwerty', 'Italian (Qwerty)'
+    PT_PT_QWERTY = 'pt-pt-qwerty', 'Portuguese (Qwerty)'
+    PT_BR_QWERTY = 'pt-br-qwerty', 'Portuguese Brazilian (Qwerty)'
+    PL_PL_QWERTY = 'pl-pl-qwerty', 'Polish (Qwerty)'
+    HU_HU_QWERTZ = 'hu-hu-qwertz', 'Hungarian (Qwertz)'
+    NO_NO_QWERTY = 'no-no-qwerty', 'Norwegian (Qwerty)'
+    RO_RO_QWERTY = 'ro-ro-qwerty', 'Romanian (Qwerty)'
+    DA_DK_QWERTY = 'da-dk-qwerty', 'Danish (Qwerty)'
+    FR_CA_QWERTY = 'fr-ca-qwerty', 'Canadian French (Qwerty)'
+
+
+class AppletConnectionMethod(TextChoices):
+    WEB = 'web', _('Web')
+    CLIENT = 'client', _('Client')
+
+
+class FileNameConflictResolution(TextChoices):
+    REPLACE = 'replace', _('Replace')
+    SUFFIX = 'suffix', _('Suffix')

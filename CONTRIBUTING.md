@@ -1,5 +1,10 @@
 # Contributing
 
+As a contributor, you should agree that:
+
+- The producer can adjust the open-source agreement to be more strict or relaxed as deemed necessary.
+- Your contributed code may be used for commercial purposes, including but not limited to its cloud business operations.
+
 ## Create pull request
 PR are always welcome, even if they only contain small fixes like typos or a few lines of code. If there will be a significant effort, please document it as an issue and get a discussion going before starting to work on it.
 
@@ -23,3 +28,4 @@ When reporting issues, always include:
 
 Because the issues are open to the public, when submitting files, be sure to remove any sensitive information, e.g. user name, password, IP address, and company name. You can
 replace those parts with "REDACTED" or other strings like "****".
+

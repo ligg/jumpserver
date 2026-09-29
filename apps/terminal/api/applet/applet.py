@@ -1,0 +1,173 @@
+import os
+import os.path
+import shutil
+from typing import Callable
+
+from django.conf import settings
+from django.core.files.storage import default_storage
+from django.db.models import Q
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
+from django.utils.translation import gettext as _, gettext_lazy
+from django_filters import rest_framework as filters
+from rest_framework import viewsets
+from rest_framework.decorators import action
+from rest_framework.request import Request
+from rest_framework.response import Response
+from rest_framework.serializers import ValidationError
+
+from common.api import JMSBulkModelViewSet
+from common.drf.filters import BaseFilterSet
+from common.serializers import FileSerializer
+from common.utils import is_uuid
+from common.utils.http import is_true
+from terminal import serializers
+from terminal.models import AppletPublication, Applet
+from common.utils.zip import safe_extract_zip
+
+__all__ = ['AppletViewSet', 'AppletPublicationViewSet']
+
+
+class DownloadUploadMixin:
+    get_serializer: Callable
+    request: Request
+    get_object: Callable
+
+    @staticmethod
+    def cleanup_tmp_files(rel_path, extract_to):
+        if rel_path and default_storage.exists(rel_path):
+            default_storage.delete(rel_path)
+        if extract_to and os.path.exists(extract_to):
+            shutil.rmtree(extract_to)
+
+    def extract_and_check_file(self, request):
+        serializer = self.get_serializer(data=self.request.data)
+        serializer.is_valid(raise_exception=True)
+
+        file = serializer.validated_data['file']
+        save_to = 'applets/{}'.format(file.name + '.tmp.zip')
+        if default_storage.exists(save_to):
+            default_storage.delete(save_to)
+        rel_path = default_storage.save(save_to, file)
+        path = default_storage.path(rel_path)
+        extract_to = default_storage.path('applets/{}.tmp'.format(file.name))
+
+        if os.path.exists(extract_to):
+            shutil.rmtree(extract_to)
+
+        try:
+            safe_extract_zip(path, extract_to)
+        except RuntimeError as e:
+            raise ValidationError({'error': _('Invalid zip file') + ': {}'.format(e)})
+
+        tmp_dir = Applet.locate_pkg_root(extract_to, file.name)
+
+        manifest = Applet.validate_pkg(tmp_dir)
+        return manifest, tmp_dir, rel_path, extract_to
+
+    @action(detail=False, methods=['post'], serializer_class=FileSerializer)
+    def upload(self, request, *args, **kwargs):
+        rel_path = None
+        extract_to = None
+        try:
+            manifest, tmp_dir, rel_path, extract_to = self.extract_and_check_file(request)
+            name = manifest['name']
+            update = request.query_params.get('update')
+
+            is_enterprise = manifest.get('edition') == Applet.Edition.enterprise
+            if is_enterprise and not settings.XPACK_LICENSE_IS_VALID:
+                raise ValidationError({'error': _('This is enterprise edition applet')})
+
+            instance = Applet.objects.filter(name=name).first()
+            if instance and not update:
+                return Response({'error': 'Applet already exists: {}'.format(name)}, status=400)
+
+            applet, serializer = Applet.install_from_dir(tmp_dir, builtin=False)
+            return Response(serializer.data, status=201)
+        finally:
+            self.cleanup_tmp_files(rel_path, extract_to)
+
+    @action(detail=True, methods=['get'])
+    def download(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.builtin:
+            path = os.path.join(settings.APPS_DIR, 'terminal', 'applets', instance.name)
+        else:
+            path = default_storage.path('applets/{}'.format(instance.name))
+        if not os.path.exists(path):
+            raise ValidationError({'error': _('Applet not found in path: {}').format(path)})
+        zip_path = shutil.make_archive(path, 'zip', path)
+        with open(zip_path, 'rb') as f:
+            response = HttpResponse(f.read(), status=200, content_type='application/octet-stream')
+            response['Content-Disposition'] = 'attachment; filename*=UTF-8\'\'{}.zip'.format(instance.name)
+        os.unlink(zip_path)
+        return response
+
+
+class AppletViewSet(DownloadUploadMixin, JMSBulkModelViewSet):
+    queryset = Applet.objects.all()
+    serializer_class = serializers.AppletSerializer
+    filterset_fields = ['name', 'version', 'builtin', 'is_active']
+    search_fields = ['name', 'display_name', 'author']
+    rbac_perms = {
+        'upload': 'terminal.add_applet',
+        'download': 'terminal.view_applet',
+    }
+
+    def get_object(self):
+        pk = self.kwargs.get('pk')
+        if not is_uuid(pk):
+            obj = get_object_or_404(Applet, name=pk)
+        else:
+            obj = get_object_or_404(Applet, pk=pk)
+        return obj
+
+    def is_record_found(self, obj, search):
+        combine_fields = ' '.join([getattr(obj, f, '') for f in self.search_fields])
+        return search in combine_fields
+
+    def filter_queryset(self, queryset):
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = [i for i in queryset if self.is_record_found(i, search)]
+
+        for field in self.filterset_fields:
+            field_value = self.request.query_params.get(field)
+            if not field_value:
+                continue
+            if field in ['is_active', 'builtin']:
+                field_value = is_true(field_value)
+            queryset = [i for i in queryset if getattr(i, field, '') == field_value]
+
+        return queryset
+
+    def perform_destroy(self, instance):
+        if not instance.name:
+            raise ValidationError('Applet is not null')
+        path = default_storage.path('applets/{}'.format(instance.name))
+        if os.path.exists(path):
+            shutil.rmtree(path)
+        instance.delete()
+
+
+class AppletPublicationFilterSet(BaseFilterSet):
+    host = filters.CharFilter(
+        method='filter_host', label=gettext_lazy('Host name, address or ID')
+    )
+
+    class Meta:
+        model = AppletPublication
+        fields = ['host', 'applet', 'status']
+
+    @staticmethod
+    def filter_host(queryset, name, value):
+        if is_uuid(value):
+            return queryset.filter(host_id=value)
+        return queryset.filter(Q(host__name=value) | Q(host__address=value))
+
+
+class AppletPublicationViewSet(viewsets.ModelViewSet):
+    queryset = AppletPublication.objects.all()
+    serializer_class = serializers.AppletPublicationSerializer
+    filterset_class = AppletPublicationFilterSet
+    search_fields = ['applet__name', 'applet__display_name', 'host__name', 'host__address']

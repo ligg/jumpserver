@@ -1,14 +1,16 @@
 # coding: utf-8
 #
+from urllib.parse import urlparse
+
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
-from django.utils.translation import ugettext_lazy as _
 
 from common.utils import get_logger
 from common.utils.ip import is_ip_address, is_ip_network, is_ip_segment
 
 logger = get_logger(__file__)
 
-__all__ = ['RuleSerializer', 'ip_group_child_validator', 'ip_group_help_text']
+__all__ = ['RuleSerializer', 'ip_group_child_validator', 'ip_group_help_text', 'address_validator']
 
 
 def ip_group_child_validator(ip_group_child):
@@ -21,8 +23,21 @@ def ip_group_child_validator(ip_group_child):
         raise serializers.ValidationError(error)
 
 
+def address_validator(value):
+    parsed = urlparse(value)
+    is_basic_url = parsed.scheme in ('http', 'https') and parsed.netloc
+    is_valid = value == '*' \
+               or is_ip_address(value) \
+               or is_ip_network(value) \
+               or is_ip_segment(value) \
+               or is_basic_url
+    if not is_valid:
+        error = _('address invalid: `{}`').format(value)
+        raise serializers.ValidationError(error)
+
+
 ip_group_help_text = _(
-    'Format for comma-delimited string, with * indicating a match all. '
+    'With * indicating a match all. '
     'Such as: '
     '192.168.10.1, 192.168.1.0/24, 10.1.1.1-10.1.1.20, 2001:db8:2de::e13, 2001:db8:1a:1110::/64 '
 )

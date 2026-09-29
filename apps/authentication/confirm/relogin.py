@@ -1,9 +1,10 @@
 from datetime import datetime
 
 from django.utils import timezone
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 from .base import BaseConfirm
+from ..const import ConfirmType
 
 SPECIFIED_TIME = 5
 
@@ -11,8 +12,8 @@ RELOGIN_ERROR = _('Login time has exceeded {} minutes, please login again').form
 
 
 class ConfirmReLogin(BaseConfirm):
-    name = 'relogin'
-    display_name = 'Re-Login'
+    name = ConfirmType.RELOGIN.value
+    display_name = ConfirmType.RELOGIN.name
 
     def check(self):
         return not self.user.is_password_authenticate()

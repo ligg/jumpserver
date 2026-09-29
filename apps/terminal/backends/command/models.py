@@ -1,29 +1,28 @@
 # -*- coding: utf-8 -*-
 #
-from datetime import datetime
 import uuid
+from datetime import datetime
+
 from django.db import models
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 from common.utils.common import lazyproperty
 from orgs.mixins.models import OrgModelMixin
+from terminal.const import RiskLevelChoices
 
 
 class AbstractSessionCommand(OrgModelMixin):
-    RISK_LEVEL_ORDINARY = 0
-    RISK_LEVEL_DANGEROUS = 5
-    RISK_LEVEL_CHOICES = (
-        (RISK_LEVEL_ORDINARY, _('Ordinary')),
-        (RISK_LEVEL_DANGEROUS, _('Dangerous')),
-    )
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
     user = models.CharField(max_length=64, db_index=True, verbose_name=_("User"))
     asset = models.CharField(max_length=128, db_index=True, verbose_name=_("Asset"))
-    system_user = models.CharField(max_length=64, db_index=True, verbose_name=_("System user"))
+    account = models.CharField(max_length=64, db_index=True, verbose_name=_("Account"))
     input = models.CharField(max_length=128, db_index=True, verbose_name=_("Input"))
     output = models.CharField(max_length=1024, blank=True, verbose_name=_("Output"))
     session = models.CharField(max_length=36, db_index=True, verbose_name=_("Session"))
-    risk_level = models.SmallIntegerField(default=RISK_LEVEL_ORDINARY, choices=RISK_LEVEL_CHOICES, db_index=True, verbose_name=_("Risk level"))
+    risk_level = models.SmallIntegerField(
+        default=RiskLevelChoices.accept, choices=RiskLevelChoices.choices, db_index=True,
+        verbose_name=_("Action")
+    )
     timestamp = models.IntegerField(db_index=True)
 
     class Meta:
@@ -41,11 +40,6 @@ class AbstractSessionCommand(OrgModelMixin):
             return session.remote_addr
         else:
             return ''
-
-    @classmethod
-    def get_risk_level_str(cls, risk_level):
-        risk_mapper = dict(cls.RISK_LEVEL_CHOICES)
-        return risk_mapper.get(risk_level)
 
     def to_dict(self):
         d = {}

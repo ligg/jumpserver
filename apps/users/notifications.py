@@ -1,43 +1,58 @@
-from urllib.parse import urljoin
 from collections import defaultdict
+from urllib.parse import urljoin
 
-from django.utils import timezone
-from django.utils.translation import ugettext as _
 from django.conf import settings
-from django.template.loader import render_to_string
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
 from common.utils import reverse, get_request_ip_or_data, get_request_user_agent
+from common.views.template import custom_render_to_string
 from notifications.notifications import UserMessage
+from users.utils import activate_user_language
 
 
 class UserCreatedMsg(UserMessage):
+    subject = settings.EMAIL_CUSTOM_USER_CREATED_SUBJECT
+    template_name = 'users/_msg_user_created.html'
+    contexts = [
+        {"name": "honorific", "label": _('Honorific'), "default": "John"},
+        {"name": "content", "label": _('Content'), "default": "Welcome to use our system."},
+        {"name": "username", "label": _('Username'), "default": "john"},
+        {"name": "name", "label": _('Name'), "default": "John"},
+        {"name": "email", "label": _('Email'), "default": "john@example.com"},
+        {"name": "rest_password_url", "label": _('Reset password url'),
+         "default": "https://example.com/reset-password"},
+        {"name": "rest_password_token", "label": _('Reset password token'), "default": "abcdefg1234567"},
+        {"name": "forget_password_url", "label": _('Forget password url'),
+         "default": "https://example.com/forget-password"},
+    ]
+
     def get_html_msg(self) -> dict:
         user = self.user
-
         mail_context = {
-            'subject': str(settings.EMAIL_CUSTOM_USER_CREATED_SUBJECT),
-            'honorific': str(settings.EMAIL_CUSTOM_USER_CREATED_HONORIFIC),
-            'content': str(settings.EMAIL_CUSTOM_USER_CREATED_BODY)
+            'subject': settings.EMAIL_CUSTOM_USER_CREATED_SUBJECT,
+            'honorific': settings.EMAIL_CUSTOM_USER_CREATED_HONORIFIC,
+            'content': settings.EMAIL_CUSTOM_USER_CREATED_BODY
         }
 
         user_info = {'username': user.username, 'name': user.name, 'email': user.email}
-        # 转换成 defaultdict，否则 format 时会报 KeyError
-        user_info = defaultdict(str, **user_info)
-        mail_context = {k: v.format_map(user_info) for k, v in mail_context.items()}
+        with activate_user_language(self.user):
+            # 转换成 defaultdict，否则 format 时会报 KeyError
+            user_info = defaultdict(str, **user_info)
+            mail_context = {k: v.format_map(user_info) for k, v in mail_context.items()}
 
-        context = {
-            **mail_context,
-            'user': user,
-            'rest_password_url': reverse('authentication:reset-password', external=True),
-            'rest_password_token': user.generate_reset_token(),
-            'forget_password_url': reverse('authentication:forgot-password', external=True),
-            'login_url': reverse('authentication:login', external=True),
-        }
-        message = render_to_string('users/_msg_user_created.html', context)
-        return {
-            'subject': mail_context['subject'],
-            'message': message
-        }
+            context = {
+                **mail_context,
+                **user_info,
+                'rest_password_url': reverse('authentication:reset-password', external=True),
+                'rest_password_token': user.generate_reset_token(),
+                'forget_password_url': reverse('authentication:forgot-password', external=True)
+            }
+            message = custom_render_to_string(self.template_name, context)
+            return {
+                'subject': mail_context['subject'],
+                'message': message
+            }
 
     @classmethod
     def gen_test_msg(cls):
@@ -46,23 +61,38 @@ class UserCreatedMsg(UserMessage):
 
 
 class ResetPasswordMsg(UserMessage):
+    subject = _('Reset password')
+    template_name = 'authentication/_msg_reset_password.html'
+    contexts = [
+        {"name": "name", "label": _('Name'), "default": "John"},
+        {"name": "username", "label": _('Username'), "default": "john"},
+        {"name": "email", "label": _('Email'), "default": "john@example.com"},
+        {"name": "rest_password_url", "label": _('Reset password url'),
+         "default": "https://example.com/reset-password"},
+        {"name": "rest_password_token", "label": _('Reset password token'), "default": "abcdefg1234567"},
+        {"name": "forget_password_url", "label": _('Forget password url'),
+         "default": "https://example.com/forget-password"},
+        {"name": "login_url", "label": _('Login url'), "default": "https://example.com/login"},
+    ]
+
     def __init__(self, user):
         super().__init__(user)
         self.reset_passwd_token = user.generate_reset_token()
 
     def get_html_msg(self) -> dict:
         user = self.user
-        subject = _('Reset password')
         context = {
-            'user': user,
+            'name': user.name,
+            'username': user.username,
+            'email': user.email,
             'rest_password_url': reverse('authentication:reset-password', external=True),
             'rest_password_token': self.reset_passwd_token,
             'forget_password_url': reverse('authentication:forgot-password', external=True),
             'login_url': reverse('authentication:login', external=True),
         }
-        message = render_to_string('authentication/_msg_reset_password.html', context)
+        message = custom_render_to_string(self.template_name, context)
         return {
-            'subject': subject,
+            'subject': str(self.subject),
             'message': message
         }
 
@@ -74,6 +104,14 @@ class ResetPasswordMsg(UserMessage):
 
 
 class ResetPasswordSuccessMsg(UserMessage):
+    subject = _('Reset password success')
+    template_name = 'authentication/_msg_rest_password_success.html'
+    contexts = [
+        {"name": "name", "label": _('Name'), "default": "John"},
+        {"name": "ip_address", "label": _('IP address'), "default": "192.168.1.1"},
+        {"name": "browser", "label": _('Browser'), "default": "Mozilla/firefox"}
+    ]
+
     def __init__(self, user, request):
         super().__init__(user)
         self.ip_address = get_request_ip_or_data(request)
@@ -82,15 +120,14 @@ class ResetPasswordSuccessMsg(UserMessage):
     def get_html_msg(self) -> dict:
         user = self.user
 
-        subject = _('Reset password success')
         context = {
             'name': user.name,
             'ip_address': self.ip_address,
             'browser': self.browser,
         }
-        message = render_to_string('authentication/_msg_rest_password_success.html', context)
+        message = custom_render_to_string(self.template_name, context)
         return {
-            'subject': subject,
+            'subject': str(self.subject),
             'message': message
         }
 
@@ -106,6 +143,14 @@ class ResetPasswordSuccessMsg(UserMessage):
 
 
 class ResetPublicKeySuccessMsg(UserMessage):
+    subject = _('Reset public key success')
+    template_name = 'authentication/_msg_rest_public_key_success.html'
+    contexts = [
+        {"name": "name", "label": _('Name'), "default": "John"},
+        {"name": "ip_address", "label": _('IP address'), "default": "192.168.1.1"},
+        {"name": "browser", "label": _('Browser'), "default": "Mozilla/firefox"}
+    ]
+
     def __init__(self, user, request):
         super().__init__(user)
         self.ip_address = get_request_ip_or_data(request)
@@ -114,15 +159,14 @@ class ResetPublicKeySuccessMsg(UserMessage):
     def get_html_msg(self) -> dict:
         user = self.user
 
-        subject = _('Reset public key success')
         context = {
             'name': user.name,
             'ip_address': self.ip_address,
             'browser': self.browser,
         }
-        message = render_to_string('authentication/_msg_rest_public_key_success.html', context)
+        message = custom_render_to_string(self.template_name, context)
         return {
-            'subject': subject,
+            'subject': str(self.subject),
             'message': message
         }
 
@@ -138,12 +182,23 @@ class ResetPublicKeySuccessMsg(UserMessage):
 
 
 class PasswordExpirationReminderMsg(UserMessage):
+    subject = _('Password is about expire')
+    template_name = 'users/_msg_password_expire_reminder.html'
+    contexts = [
+        {"name": "name", "label": _('Name'), "default": "John"},
+        {"name": "date_password_expired", "label": _('Password expiration date'), "default": "2025-01-01 12:00:00"},
+        {"name": "update_password_url", "label": _('Update password url'),
+         "default": "https://example.com/update-password"},
+        {"name": "forget_password_url", "label": _('Login url'), "default": "https://example.com/forget-password"},
+        {"name": "email", "label": _('Email'), "default": "john@example.com"},
+        {"name": "login_url", "label": _('Login url'), "default": "https://example.com/login"},
+    ]
+
     def get_html_msg(self) -> dict:
         user = self.user
-        subject = _('Password is about expire')
 
         date_password_expired_local = timezone.localtime(user.date_password_expired)
-        update_password_url = urljoin(settings.SITE_URL, '/ui/#/profile/setting/?activeTab=PasswordUpdate')
+        update_password_url = urljoin(settings.SITE_URL, '/ui/#/profile/index')
         date_password_expired = date_password_expired_local.strftime('%Y-%m-%d %H:%M:%S')
         context = {
             'name': user.name,
@@ -153,9 +208,9 @@ class PasswordExpirationReminderMsg(UserMessage):
             'email': user.email,
             'login_url': reverse('authentication:login', external=True),
         }
-        message = render_to_string('users/_msg_password_expire_reminder.html', context)
+        message = custom_render_to_string(self.template_name, context)
         return {
-            'subject': subject,
+            'subject': str(self.subject),
             'message': message
         }
 
@@ -167,17 +222,23 @@ class PasswordExpirationReminderMsg(UserMessage):
 
 
 class UserExpirationReminderMsg(UserMessage):
+    subject = _('Account is about expire')
+    template_name = 'users/_msg_account_expire_reminder.html'
+    contexts = [
+        {"name": "name", "label": _('Name'), "default": "John"},
+        {"name": "date_expired", "label": _('Expiration date'), "default": "2025-01-01 12:00:00"}
+    ]
+
     def get_html_msg(self) -> dict:
-        subject = _('Account is about expire')
         date_expired_local = timezone.localtime(self.user.date_expired)
         date_expired = date_expired_local.strftime('%Y-%m-%d %H:%M:%S')
         context = {
             'name': self.user.name,
             'date_expired': date_expired
         }
-        message = render_to_string('users/_msg_account_expire_reminder.html', context)
+        message = custom_render_to_string(self.template_name, context)
         return {
-            'subject': subject,
+            'subject': str(self.subject),
             'message': message
         }
 
@@ -189,16 +250,22 @@ class UserExpirationReminderMsg(UserMessage):
 
 
 class ResetSSHKeyMsg(UserMessage):
+    subject = _('Reset SSH Key')
+    template_name = 'users/_msg_reset_ssh_key.html'
+    contexts = [
+        {"name": "name", "label": _('Name'), "default": "John"},
+        {"name": "url", "label": _('Update SSH Key url'), "default": "https://example.com/profile/password-and-ssh-key"}
+    ]
+
     def get_html_msg(self) -> dict:
-        subject = _('Reset SSH Key')
-        update_url = urljoin(settings.SITE_URL, '/ui/#/users/profile/?activeTab=SSHUpdate')
+        update_url = urljoin(settings.SITE_URL, '/ui/#/profile/password-and-ssh-key/?tab=SSHKey')
         context = {
             'name': self.user.name,
             'url': update_url,
         }
-        message = render_to_string('users/_msg_reset_ssh_key.html', context)
+        message = custom_render_to_string(self.template_name, context)
         return {
-            'subject': subject,
+            'subject': str(self.subject),
             'message': message
         }
 
@@ -210,15 +277,21 @@ class ResetSSHKeyMsg(UserMessage):
 
 
 class ResetMFAMsg(UserMessage):
+    subject = _('Reset MFA')
+    template_name = 'users/_msg_reset_mfa.html'
+    contexts = [
+        {"name": "name", "label": _('Name'), "default": "John"},
+        {"name": "url", "label": _('Reset MFA url'), "default": "https://example.com/profile/mfa"}
+    ]
+
     def get_html_msg(self) -> dict:
-        subject = _('Reset MFA')
         context = {
             'name': self.user.name,
             'url': reverse('authentication:user-otp-enable-start', external=True),
         }
-        message = render_to_string('users/_msg_reset_mfa.html', context)
+        message = custom_render_to_string('users/_msg_reset_mfa.html', context)
         return {
-            'subject': subject,
+            'subject': str(self.subject),
             'message': message
         }
 

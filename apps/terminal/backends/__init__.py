@@ -1,10 +1,9 @@
 from importlib import import_module
+
 from django.conf import settings
 from django.utils.functional import LazyObject
 
 from common.utils import get_logger
-from .command.serializers import SessionCommandSerializer
-
 
 logger = get_logger(__file__)
 
@@ -22,7 +21,7 @@ def get_command_storage():
 
 
 def get_server_replay_storage():
-    from jms_storage import get_object_storage
+    from common.storage.jms_storage import get_object_storage
     config = settings.SERVER_REPLAY_STORAGE
     storage = get_object_storage(config)
     return storage
@@ -33,7 +32,7 @@ def get_terminal_command_storages():
     storage_list = {}
     for s in CommandStorage.objects.all():
         if not s.is_valid():
-            logger.warn(f'Command storage invalid: storage={s}')
+            logger.warning(f'Command storage invalid: storage={s}')
             continue
 
         if s.type_server:

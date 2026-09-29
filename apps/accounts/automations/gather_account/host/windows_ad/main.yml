@@ -1,0 +1,61 @@
+- hosts: demo
+  gather_facts: no
+  tasks:
+    - name: Gather Active Directory accounts as JSON
+      win_shell: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ActiveDirectory -ErrorAction Stop
+
+        $groupNames = @{}
+        Get-ADGroup -Filter * -Properties DistinguishedName, Name |
+          ForEach-Object {
+            $groupNames[$_.DistinguishedName] = $_.Name
+          }
+
+        $users = Get-ADUser -Filter * -Properties `
+          Name, SamAccountName, Enabled, LastLogonDate, PasswordLastSet, `
+          msDS-UserPasswordExpiryTimeComputed, MemberOf |
+          ForEach-Object {
+            $passwordExpiry = $null
+            $expiryRaw = $_.'msDS-UserPasswordExpiryTimeComputed'
+            if ($expiryRaw -and $expiryRaw -lt [long]::MaxValue) {
+              try {
+                $passwordExpiry = [datetime]::FromFileTime($expiryRaw)
+              } catch {
+                $passwordExpiry = $null
+              }
+            }
+
+            [PSCustomObject]@{
+              Name = $_.Name
+              SamAccountName = $_.SamAccountName
+              Enabled = $_.Enabled
+              LastLogonDate = if ($_.LastLogonDate) {
+                $_.LastLogonDate.ToString('o')
+              } else { $null }
+              PasswordLastSet = if ($_.PasswordLastSet) {
+                $_.PasswordLastSet.ToString('o')
+              } else { $null }
+              PasswordExpires = if ($passwordExpiry) {
+                $passwordExpiry.ToString('o')
+              } else { $null }
+              GlobalGroupMemberships = @(
+                $_.MemberOf | ForEach-Object {
+                  if ($groupNames.ContainsKey($_)) {
+                    $groupNames[$_]
+                  } else {
+                    $_
+                  }
+                }
+              )
+            }
+          }
+
+        ConvertTo-Json -InputObject @($users) -Depth 4 -Compress
+      register: ad_users
+      changed_when: false
+
+    - name: Define gathered account info
+      ansible.builtin.set_fact:
+        info:
+          user_details: "{{ ad_users.stdout | from_json }}"

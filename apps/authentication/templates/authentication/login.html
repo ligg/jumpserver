@@ -14,11 +14,27 @@
     <!-- Stylesheets -->
     <link href="{% static 'css/login-style.css' %}" rel="stylesheet">
     <link href="{% static 'css/jumpserver.css' %}" rel="stylesheet">
-    <script src="{% static "js/jumpserver.js" %}?_=9"></script>
+    <script src="{% static 'js/jumpserver.js' %}?v=10"></script>
 
     <style>
         .login-content {
-            box-shadow: 0 5px 5px -3px rgba(0, 0, 0, 0.15), 0 8px 10px 1px rgba(0, 0, 0, 0.14), 0 3px 14px 2px rgba(0, 0, 0, 0.12);
+        {% comment %} box-shadow: 0 5px 5px -3px rgb(0 0 0 / 15%), 0 8px 10px 1px rgb(0 0 0 / 14%), 0 3px 14px 2px rgb(0 0 0 / 12%); {% endcomment %}
+        }
+
+        .login-footer {
+            height: 50px;
+            width: 1000px;
+            margin: 40px auto;
+            text-align: center;
+        }
+
+        .footer-item {
+            padding: 5px 20px;
+            color: gray;
+        }
+
+        .footer-item a {
+            color: gray;
         }
 
         .help-block {
@@ -53,17 +69,26 @@
         }
 
         .login-content {
-            height: 490px;
-            width: 1066px;
-            margin-right: auto;
-            margin-left: auto;
-            margin-top: calc((100vh - 470px) / 3);
+            height: 500px;
+            width: 1000px;
+            margin-top: auto;
+            margin-bottom: auto;
         }
 
+
         body {
-            background-color: #f2f2f2;
-            height: calc(100vh - (100vh - 470px) / 3);
+            box-sizing: border-box;
+            min-height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            width: 100vw;
+            height: 100vh;
+            background-color: #f3f3f3;
+        {#height: calc(100vh - (100vh - 470px) / 3);#}
         }
+
 
         .captcha {
             float: right;
@@ -80,6 +105,28 @@
             background-color: white;
             height: 100%;
             width: 50%;
+            border-right: 1px solid #EFF0F1;
+        }
+
+        .left-form-box .form-panel {
+            position: relative;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .left-form-box .form-panel {
+            position: relative;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .left-form-box .form-panel .form-mobile {
+            padding: 15px 60px;
+            text-align: left
+        }
+
+        .left-form-box .form-panel .form-mobile h2 {
+            display: inline
         }
 
         .red-fonts {
@@ -95,11 +142,11 @@
         }
 
         .jms-title {
-            padding: 60px 10px 10px;
+        {#padding: 22px 10px 10px;#}
         }
 
         .more-login-items {
-            margin-top: 10px;
+            margin-top: 15px;
         }
 
         .more-login-item {
@@ -120,12 +167,12 @@
         }
 
         .login-page-language {
-            font-size: 12px!important;
-            margin-right: -11px !important;
+            font-size: 12px !important;
+            margin-right: -32px !important;
             padding-top: 12px !important;
             padding-left: 0 !important;
             padding-bottom: 8px !important;
-            color: #666 !important;
+            color: #8F959E !important;
             font-weight: 350 !important;
             min-height: auto !important;
         }
@@ -136,15 +183,20 @@
         }
 
         .jms-title {
+            display: flex;
+            justify-content: center;
+            align-items: center;
             font-size: 21px;
-            font-weight:400;
+            font-weight: 400;
             color: #151515;
             letter-spacing: 0;
         }
+
         .more-methods-title {
             position: relative;
             margin-top: 20px;
         }
+
         .more-methods-title:before, .more-methods-title:after {
             position: absolute;
             top: 50%;
@@ -153,18 +205,23 @@
             border: 1px dashed #e7eaec;
             width: 35%;
         }
+
         .more-methods-title:before {
             left: 0;
         }
+
         .more-methods-title:after {
             right: 0;
         }
-        .more-methods-title.ja:before, .more-methods-title.ja:after{
+
+        .more-methods-title.ja:before, .more-methods-title.ja:after {
             width: 26%;
         }
+
         .captcha-field .form-group {
             margin-bottom: 5px;
         }
+
         .auto-login.form-group .checkbox {
             margin: 5px 0;
         }
@@ -176,10 +233,95 @@
         .has-error .more-login {
             margin-top: 0;
         }
+
+        .welcome-message {
+            color: #646A73;
+        }
+
+        .navbar-right .dropdown-menu {
+            right: -24px !important;
+            left: auto;
+        }
+
+        .auto_login_box {
+            display: inline-block;
+        }
+
+        .auto-login input[type=checkbox] {
+
+        }
+
+        .error-info {
+            font-size: 16px;
+            text-align: center;
+        }
+
+        .mobile-logo {
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            body {
+                background-color: #ffffff;
+            }
+
+            .login-content {
+                width: 100%;
+            }
+
+            .left-form-box {
+                width: 100%;
+                border-right: none;
+            }
+
+            .right-image-box {
+                display: none;
+            }
+
+            .navbar-top-links {
+                display: inline;
+                float: right;
+            }
+
+            .mobile-logo {
+                display: block;
+                padding: 0 45px;
+                text-align: left;
+            }
+
+            .right-image {
+                height: revert;
+                width: revert;
+            }
+
+            .left-form-box .form-panel {
+                transform: translateY(-65%);
+            }
+
+            .left-form-box .form-panel .form-mobile h2 {
+                padding: 0;
+                margin: 0;
+            }
+        }
     </style>
 </head>
 
 <body>
+{% if error_origin %}
+    <div class='alert alert-danger error-info'>
+        {% trans 'Configuration file has problems and cannot be logged in. Please contact the administrator or view latest docs' %}<br/>
+        {% trans 'If you are administrator, you can update the config resolve it, set' %} <br/>
+        DOMAINS={{ error_origin }}
+    </div>
+{% endif %}
+{% if csrf_cookie_error %}
+    <div class='alert alert-danger error-info'>
+        {% trans 'The browser did not carry the CSRF cookie and cannot be logged in. Please contact the administrator' %}<br/>
+        {% trans 'If you are administrator, check whether SESSION_COOKIE_DOMAIN is misconfigured: the domain you are accessing must be it or its subdomain, otherwise the browser will not save the cookie, fix or remove it' %} <br/>
+        SESSION_COOKIE_DOMAIN={% if session_cookie_domain %}{{ session_cookie_domain }}{% else %}{% trans 'not set' %}{% endif %}<br/>
+        {% trans 'Please make sure cookies are enabled in your browser, clear the site cookies and try again' %}
+    </div>
+{% endif %}
 <div class="login-content extra-fields-{{ extra_fields_count }}">
     <div class="right-image-box">
         <a href="{% if not XPACK_ENABLED %}https://github.com/jumpserver/jumpserver.git{% endif %}">
@@ -187,57 +329,65 @@
         </a>
     </div>
     <div class="left-form-box {% if not form.challenge and not form.captcha %} no-captcha-challenge {% endif %}">
-        <div style="background-color: white">
-            <ul class="nav navbar-top-links navbar-right">
-                <li class="dropdown">
-                    <a class="dropdown-toggle login-page-language" data-toggle="dropdown" href="#" target="_blank">
-                        <i class="fa fa-globe fa-lg" style="margin-right: 2px"></i>
-                        <span>{{ current_lang.title }}<b class="caret"></b></span>
-                    </a>
-                    <ul class="dropdown-menu profile-dropdown dropdown-menu-right">
-                        {% for lang in langs %}
-                        <li>
-                            <a href="{% url 'i18n-switch' lang=lang.code %}">
-                                <span>{{ lang.title }}</span>
-                            </a>
-                        </li>
-                        {% endfor %}
-                    </ul>
-                </li>
-            </ul>
+        <div class="mobile-logo" style="padding-bottom: 45px; box-sizing: border-box">
             <div class="jms-title">
-                <span style="">{{ INTERFACE.login_title }}</span>
+                <img style="width: 60px; height: 60px" src="{{ INTERFACE.logo_logout }}" alt="Logo"/>
+                <span style="padding-left: 10px">{{ INTERFACE.login_title }}</span>
             </div>
-            <div class="contact-form col-md-10 col-md-offset-1">
-                <form id="login-form" action="" method="post" role="form" novalidate="novalidate">
+        </div>
+        <div class="form-panel">
+            <div class="form-mobile">
+                <h2 style='font-weight: 400;'>
+                    {% trans 'Login' %}
+                </h2>
+                <ul class=" nav navbar-top-links navbar-right">
+                    <li class="dropdown">
+                        <a class="dropdown-toggle login-page-language" data-bs-toggle="dropdown" href="#"
+                           target="_blank">
+                            <i class="fa fa-globe fa-lg" style="margin-right: 2px"></i>
+                            <span>{{ current_lang.title }}<b class="caret"></b></span>
+                        </a>
+                        <ul class="dropdown-menu profile-dropdown dropdown-menu-right">
+                            {% for lang in langs %}
+                                <li>
+                                    <a href="{% url 'i18n-switch' lang=lang.code %}">
+                                        <span>{{ lang.title }}</span>
+                                    </a>
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    </li>
+                </ul>
+            </div>
+            <div class="contact-form col-md-10 col-md-offset-1" style='float: none; overflow: hidden'>
+                <form id="login-form" autocomplete="off" action="" method="post" role="form" novalidate="novalidate">
                     {% csrf_token %}
                     <div style="line-height: 17px;margin-bottom: 20px;color: #999999;">
-                    {% if form.non_field_errors %}
-                        <p class="help-block red-fonts">
-                            {{ form.non_field_errors.as_text }}
-                        </p>
-                    {% else %}
-                        <p class="welcome-message">
-                            {% trans 'Welcome back, please enter username and password to login' %}
-                        </p>
-                    {% endif %}
+                        {% if form.non_field_errors %}
+                            <p class="help-block red-fonts">
+                                {{ form.non_field_errors.as_text }}
+                            </p>
+                        {% endif %}
                     </div>
 
-                    {% bootstrap_field form.username show_label=False %}
+                    {% bootstrap_field form.username autocomplete="off" show_label=False %}
                     <div class="form-group {% if form.password.errors %} has-error {% endif %}">
-                        <input type="password" class="form-control" id="password" placeholder="{% trans 'Password' %}" required>
-                        <input id="password-hidden" type="text" style="display:none" name="{{ form.password.html_name }}">
+                        <input type="password" autocomplete="off" class="form-control" id="password"
+                               placeholder="{% trans 'Password' %}"
+                               required>
+                        <input id="password-hidden" type="text" style="display:none"
+                               name="{{ form.password.html_name }}" autocomplete="off" aria-hidden="true" tabindex="-1">
                         {% if form.password.errors %}
-                        <p class="help-block" style="text-align: left">
-                            {{ form.password.errors.as_text }}
-                        </p>
+                            <p class="help-block" style="text-align: left">
+                                {{ form.password.errors.as_text }}
+                            </p>
                         {% endif %}
                     </div>
                     {% if form.challenge %}
                         {% bootstrap_field form.challenge show_label=False %}
                     {% elif form.mfa_type %}
                         <div class="form-group" style="display: flex">
-                        {% include '_mfa_login_field.html' %}
+                            {% include '_mfa_login_field.html' %}
                         </div>
                     {% elif form.captcha %}
                         <div class="captcha-field">
@@ -245,13 +395,14 @@
                         </div>
                     {% endif %}
                     <div class="form-group auto-login" style="margin-bottom: 10px">
-                        <div class="row">
-                            <div class="col-md-6" style="text-align: left">
+                        <div class="row" style="overflow: hidden;">
+                            <div class="col-md-6 col-xs-6" style="text-align: left">
                                 {% if form.auto_login %}
-                                    {% bootstrap_field form.auto_login form_group_class='' %}
+                                    {% bootstrap_field form.auto_login form_group_class='auto_login_box' %}
                                 {% endif %}
                             </div>
-                            <div class="col-md-6" style="line-height: 25px">
+
+                            <div class="col-md-6 col-xs-6" style="line-height: 25px">
                                 <a id="forgot_password" href="{{ forgot_password_url }}" style="float: right">
                                     <small>{% trans 'Forgot password' %}?</small>
                                 </a>
@@ -260,22 +411,31 @@
                     </div>
 
                     <div class="form-group">
-                        <button type="submit" class="btn btn-transparent" onclick="doLogin();return false;">
+                        <button type="submit" id="login" class="btn btn-transparent">
                             {% trans 'Login' %}
                         </button>
                     </div>
 
+                    {% if demo_mode %}
+                        <div>
+                            <p class="red-fonts" style='text-align: center;'>
+                                {% trans 'Username' %}: demo {% trans 'Password' %}: jumpserver
+                            </p>
+                        </div>
+                    {% endif %}
+
                     <div class="more-login">
                         {% if auth_methods %}
                             <div class="more-methods-title {{ current_lang.code }}">
-                                    {% trans "More login options" %}
+                                {% trans "More login options" %}
                             </div>
                             <div class="more-login-items">
-                            {% for method in auth_methods %}
-                                <a href="{{ method.url }}" class="more-login-item">
-                                    <i class="fa"><img src="{{ method.logo }}" height="15" width="15"></i> {{ method.name }}
-                                </a>
-                            {% endfor %}
+                                {% for method in auth_methods %}
+                                    <a href="{{ method.url }}" class="more-login-item">
+                                        <i class="fa"><img src="{{ method.logo }}" height="15" width="15"/> </i>
+                                        {{ method.name }}
+                                    </a>
+                                {% endfor %}
                             </div>
                         {% else %}
                             <div class="text-center" style="display: inline-block;">
@@ -287,19 +447,48 @@
         </div>
     </div>
 </div>
+
 </body>
 {% include '_foot_js.html' %}
-<script type="text/javascript" src="/static/js/plugins/jsencrypt/jsencrypt.min.js"></script>
-<script type="text/javascript" src="/static/js/plugins/cryptojs/crypto-js.min.js"></script>
-<script type="text/javascript" src="/static/js/plugins/buffer/buffer.min.js"></script>
+
+<script type="text/javascript" src="/static/js/crypto.bundle.js"></script>
+<script type="text/javascript" src="{% static 'js/session-encrypt.js' %}?v=2"></script>
+
 <script>
-    function doLogin() {
-        //公钥加密
-        var password = $('#password').val(); //明文密码
-        var passwordEncrypted = encryptPassword(password)
-        $('#password-hidden').val(passwordEncrypted); //返回给密码输入input
-        $('#login-form').submit(); //post提交
+    (function () {
+        var form = document.getElementById('login-form');
+        var loginBtn = document.getElementById('login');
+        if (!form) return;
+        var submitting = false;
+
+        function unlock() {
+            submitting = false;
+            if (loginBtn) loginBtn.disabled = false;
+        }
+
+        form.addEventListener('submit', function (evt) {
+            evt.preventDefault();
+            if (submitting) return;
+            submitting = true;
+            if (loginBtn) loginBtn.disabled = true;
+            $('#password-hidden').val(encryptPassword($('#password').val()));
+            form.submit();
+        });
+
+        window.addEventListener('pageshow', function (e) {
+            if (e.persisted) unlock();
+        });
+    })();
+
+    function checkHealth() {
+        let url = "{% url 'health' %}";
+        requestApi({
+            url: url,
+            method: "GET",
+            flash_message: false,
+        })
     }
+
+    setInterval(checkHealth, 30 * 1000);
 </script>
 </html>
-

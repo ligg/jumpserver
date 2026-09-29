@@ -2,18 +2,16 @@
 # -*- coding: utf-8 -*-
 #
 
-from django.urls import path, re_path
+from django.urls import path
 from rest_framework_bulk.routes import BulkRouter
 
-from common import api as capi
 from .. import api
 
 app_name = 'terminal'
 
 router = BulkRouter()
 router.register(r'sessions', api.SessionViewSet, 'session')
-router.register(r'terminals/(?P<terminal>[a-zA-Z0-9\-]{36})?/?status', api.StatusViewSet, 'terminal-status')
-router.register(r'terminals/(?P<terminal>[a-zA-Z0-9\-]{36})?/?sessions', api.SessionViewSet, 'terminal-sessions')
+router.register(r'terminals/((?P<terminal>[^/.]{36})/)?status', api.StatusViewSet, 'terminal-status')
 router.register(r'terminals', api.TerminalViewSet, 'terminal')
 router.register(r'tasks', api.TaskViewSet, 'tasks')
 router.register(r'commands', api.CommandViewSet, 'command')
@@ -24,6 +22,18 @@ router.register(r'session-sharings', api.SessionSharingViewSet, 'session-sharing
 router.register(r'session-join-records', api.SessionJoinRecordsViewSet, 'session-sharing-record')
 router.register(r'endpoints', api.EndpointViewSet, 'endpoint')
 router.register(r'endpoint-rules', api.EndpointRuleViewSet, 'endpoint-rule')
+router.register(r'applets', api.AppletViewSet, 'applet')
+router.register(r'applet-hosts/((?P<host>[^/.]+)/)?accounts', api.AppletHostAccountsViewSet, 'applet-host-account')
+router.register(r'applet-hosts/((?P<host>[^/.]+)/)?applets', api.AppletHostAppletViewSet, 'applet-host-applet')
+router.register(r'applet-hosts', api.AppletHostViewSet, 'applet-host')
+router.register(r'applet-publications', api.AppletPublicationViewSet, 'applet-publication')
+router.register(r'applet-host-deployments', api.AppletHostDeploymentViewSet, 'applet-host-deployment')
+router.register(r'virtual-apps', api.VirtualAppViewSet, 'virtual-app')
+router.register(r'app-providers', api.AppProviderViewSet, 'app-provider')
+router.register(r'app-provider-deployments', api.AppProviderDeploymentViewSet, 'app-provider-deployment')
+router.register(r'app-providers/((?P<provider>[^/.]+)/)?accounts', api.AppProviderAccountViewSet, 'app-provider-account')
+router.register(r'app-providers/((?P<provider>[^/.]+)/)?apps', api.AppProviderAppViewSet, 'app-provider-app')
+router.register(r'virtual-app-publications', api.VirtualAppPublicationViewSet, 'virtual-app-publication')
 
 urlpatterns = [
     path('my-sessions/', api.MySessionAPIView.as_view(), name='my-session'),
@@ -33,25 +43,22 @@ urlpatterns = [
     path('sessions/<uuid:pk>/replay/',
          api.SessionReplayViewSet.as_view({'get': 'retrieve', 'post': 'create'}),
          name='session-replay'),
+    path('sessions/<uuid:pk>/replay-index/',
+         api.SessionReplayViewSet.as_view({'get': 'index'}),
+         name='session-replay-index'),
     path('tasks/kill-session/', api.KillSessionAPI.as_view(), name='kill-session'),
     path('tasks/kill-session-for-ticket/', api.KillSessionForTicketAPI.as_view(), name='kill-session-for-ticket'),
     path('terminals/config/', api.TerminalConfig.as_view(), name='terminal-config'),
     path('commands/insecure-command/', api.InsecureCommandAlertAPI.as_view(), name="command-alert"),
-    path('replay-storages/<uuid:pk>/test-connective/', api.ReplayStorageTestConnectiveApi.as_view(), name='replay-storage-test-connective'),
-    path('command-storages/<uuid:pk>/test-connective/', api.CommandStorageTestConnectiveApi.as_view(), name='command-storage-test-connective'),
+    path('replay-storages/<uuid:pk>/test-connective/', api.ReplayStorageTestConnectiveApi.as_view(),
+         name='replay-storage-test-connective'),
+    path('command-storages/<uuid:pk>/test-connective/', api.CommandStorageTestConnectiveApi.as_view(),
+         name='command-storage-test-connective'),
     # components
     path('components/metrics/', api.ComponentsMetricsAPIView.as_view(), name='components-metrics'),
-    # v2: get session's replay
-    # path('v2/sessions/<uuid:pk>/replay/',
-    #     api.SessionReplayV2ViewSet.as_view({'get': 'retrieve'}),
-    #     name='session-replay-v2'),
+    path('components/connect-methods/', api.ConnectMethodListApi.as_view(), name='connect-methods'),
+    path('loki/logs/', api.LokiLogAPI.as_view(), name='loki-logs'),
+    path('encrypted-config/', api.EncryptedTerminalConfig.as_view(), name='encrypted-terminal-config'),
 ]
 
-old_version_urlpatterns = [
-    re_path('(?P<resource>terminal|command)/.*', capi.redirect_plural_name_api)
-]
-
-urlpatterns += router.urls + old_version_urlpatterns
-
-
-
+urlpatterns += router.urls

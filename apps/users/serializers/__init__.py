@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 #
-from .user import *
-from .profile import *
 from .group import *
+from .preference import *
+from .profile import *
 from .realtion import *
+from .tree import *
+from .user import *

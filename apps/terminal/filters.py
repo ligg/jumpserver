@@ -1,27 +1,99 @@
-from django_filters import rest_framework as filters
 from django.db.models import QuerySet
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+from django_filters import rest_framework as filters
 
-from orgs.utils import current_org, filter_org_queryset
-from terminal.models import Command, CommandStorage
+from common.drf.filters import BaseFilterSet
+from orgs.utils import filter_org_queryset
+from terminal.const import RiskLevelChoices
+from terminal.models import Command, CommandStorage, Session
 
 
-class CommandFilter(filters.FilterSet):
-    date_from = filters.DateTimeFilter(method='do_nothing')
-    date_to = filters.DateTimeFilter(method='do_nothing')
-    session_id = filters.CharFilter(field_name='session')
-    command_storage_id = filters.UUIDFilter(method='do_nothing')
-    user = filters.CharFilter(lookup_expr='startswith')
-    input = filters.CharFilter(lookup_expr='icontains')
+class CommandFilter(BaseFilterSet):
+    days = filters.NumberFilter(
+        method='filter_days', label=_('Created days')
+    )
+    days__lt = filters.NumberFilter(
+        method='filter_days', label=_('Created days less than')
+    )
+    id = filters.UUIDFilter(
+        method='filter_exact', label=_('Command ID')
+    )
+    date_from = filters.DateTimeFilter(
+        method='do_nothing', label=_('Date from')
+    )
+    date_to = filters.DateTimeFilter(method='do_nothing', label=_('Date to'))
+    session_id = filters.CharFilter(
+        field_name='session', label=_('Session ID')
+    )
+    command_storage_id = filters.UUIDFilter(
+        method='do_nothing', label=_('Command storage ID')
+    )
+    user = filters.CharFilter(
+        method='filter_startswith', label=_('User name')
+    )
+    input = filters.CharFilter(
+        method='filter_icontains', label=_('Command')
+    )
+    asset = filters.CharFilter(
+        method='filter_icontains', label=_('Asset name')
+    )
+    asset_id = filters.UUIDFilter(
+        method='filter_by_asset_id', label=_('Asset ID')
+    )
+    account = filters.CharFilter(
+        method='filter_exact', label=_('Account name')
+    )
+    session = filters.CharFilter(
+        method='filter_exact', label=_('Session ID')
+    )
+    risk_level = filters.ChoiceFilter(
+        method='filter_exact', choices=RiskLevelChoices.choices,
+        label=_('Risk level')
+    )
 
     class Meta:
         model = Command
         fields = [
-            'asset', 'system_user', 'user', 'session', 'risk_level', 'input',
-            'date_from', 'date_to', 'session_id', 'risk_level', 'command_storage_id',
+            'id', 'user', 'asset', 'asset_id', 'account', 'input',
+            'risk_level', 'session',
         ]
+        fields_operator = {
+            'id': ('exact',),
+            'user': ('startswith',),
+            'asset': ('icontains',),
+            'asset_id': ('exact',),
+            'account': ('exact',),
+            'input': ('icontains',),
+            'session': ('exact',),
+        }
+
+    @staticmethod
+    def filter_exact(queryset, name, value):
+        return queryset.filter(**{name: value})
+
+    @staticmethod
+    def filter_startswith(queryset, name, value):
+        return queryset.filter(**{f'{name}__startswith': value})
+
+    @staticmethod
+    def filter_icontains(queryset, name, value):
+        return queryset.filter(**{f'{name}__icontains': value})
 
     def do_nothing(self, queryset, name, value):
         return queryset
+
+    @staticmethod
+    def filter_days(queryset, name, value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return queryset.none()
+        timestamp = (
+            timezone.now() - timezone.timedelta(days=value)
+        ).timestamp()
+        lookup = 'timestamp__gte' if name == 'days' else 'timestamp__lt'
+        return queryset.filter(**{lookup: timestamp})
 
     @property
     def qs(self):
@@ -34,35 +106,32 @@ class CommandFilter(filters.FilterSet):
         date_from = self.form.cleaned_data.get('date_from')
         date_to = self.form.cleaned_data.get('date_to')
 
-        filters = {}
+        _filters = {}
         if date_from:
             date_from = date_from.timestamp()
-            filters['timestamp__gte'] = date_from
+            _filters['timestamp__gte'] = date_from
 
         if date_to:
             date_to = date_to.timestamp()
-            filters['timestamp__lte'] = date_to
+            _filters['timestamp__lte'] = date_to
 
-        qs = qs.filter(**filters)
+        qs = qs.filter(**_filters)
         return qs
 
-
-class CommandFilterForStorageTree(CommandFilter):
-    asset = filters.CharFilter(method='do_nothing')
-    system_user = filters.CharFilter(method='do_nothing')
-    session = filters.CharFilter(method='do_nothing')
-    risk_level = filters.NumberFilter(method='do_nothing')
-
-    class Meta:
-        model = CommandStorage
-        fields = [
-            'asset', 'system_user', 'user', 'session', 'risk_level', 'input',
-            'date_from', 'date_to', 'session_id', 'risk_level', 'command_storage_id',
-        ]
+    def filter_by_asset_id(self, queryset, name, value):
+        asset_id = self.form.cleaned_data.get('asset_id')
+        filters = {}
+        if asset_id:
+            session_ids = Session.objects.filter(asset_id=asset_id).values_list('id', flat=True)
+            filters['session__in'] = list(session_ids)
+        queryset = queryset.filter(**filters)
+        return queryset
 
 
 class CommandStorageFilter(filters.FilterSet):
-    real = filters.BooleanFilter(method='filter_real')
+    real = filters.BooleanFilter(
+        method='filter_real', label=_('Real storage')
+    )
 
     class Meta:
         model = CommandStorage

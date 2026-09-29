@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 #
+from django.db.models import QuerySet
 from rest_framework.viewsets import ModelViewSet, GenericViewSet
-from rest_framework_bulk import BulkModelViewSet
+from rest_framework_bulk.generics import BulkModelViewSet
 
-from common.mixins import CommonApiMixin, RelationMixin
+from common.api import CommonApiMixin, RelationMixin
 from orgs.utils import current_org
-
 from ..utils import set_to_root_org
 
 __all__ = [
     'RootOrgViewMixin', 'OrgModelViewSet', 'OrgBulkModelViewSet', 'OrgQuerySetMixin',
-    'OrgGenericViewSet', 'OrgRelationMixin'
+    'OrgGenericViewSet', 'OrgRelationMixin', 'OrgReadonlyModelViewSet'
 ]
 
 
@@ -21,6 +21,10 @@ class RootOrgViewMixin:
 
 
 class OrgQuerySetMixin:
+    queryset: QuerySet
+    get_serializer_class: callable
+    action: str
+
     def get_queryset(self):
         if hasattr(self, 'model'):
             queryset = self.model.objects.all()
@@ -30,13 +34,6 @@ class OrgQuerySetMixin:
                     % self.__class__.__name__
             )
             queryset = super().get_queryset()
-
-        if hasattr(self, 'swagger_fake_view'):
-            return queryset[:1]
-        if hasattr(self, 'action') and self.action == 'list':
-            serializer_class = self.get_serializer_class()
-            if serializer_class and hasattr(serializer_class, 'setup_eager_loading'):
-                queryset = serializer_class.setup_eager_loading(queryset)
         return queryset
 
 
@@ -65,10 +62,14 @@ class OrgBulkModelViewSet(CommonApiMixin, OrgViewSetMixin, BulkModelViewSet):
         return False
 
 
+class OrgReadonlyModelViewSet(OrgModelViewSet):
+    http_method_names = ['get', 'head', 'options']
+
+
 class OrgRelationMixin(RelationMixin):
     def get_queryset(self):
         queryset = super().get_queryset()
         if not current_org.is_root():
-            org_id = current_org.org_id()
+            org_id = current_org.id
             queryset = queryset.filter(**{f'{self.from_field}__org_id': org_id})
         return queryset

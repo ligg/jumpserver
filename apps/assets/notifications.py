@@ -1,25 +1,25 @@
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext as _
 
-from users.models import User
-from common.tasks import send_mail_attachment_async
+from notifications.notifications import UserMessage
 
 
-class AccountBackupExecutionTaskMsg(object):
-    subject = _('Notification of account backup route task results')
+class BulkUpdatePlatformSkipAssetUserMsg(UserMessage):
+    def __init__(self, user, assets):
+        super().__init__(user)
+        self.assets = assets
 
-    def __init__(self, name: str, user: User):
-        self.name = name
-        self.user = user
+    def get_html_msg(self) -> dict:
+        subject = _("Batch update platform in assets, skipping assets that do not meet platform type")
+        message = f'<ol>{"".join([f"<li>{asset}</li>" for asset in self.assets])}</ol>'
+        return {
+            'subject': subject,
+            'message': message
+        }
 
-    @property
-    def message(self):
-        name = self.name
-        if self.user.secret_key:
-            return _('{} - The account backup passage task has been completed. See the attachment for details').format(name)
-        return _("{} - The account backup passage task has been completed: the encryption password has not been set - "
-                 "please go to personal information -> file encryption password to set the encryption password").format(name)
-
-    def publish(self, attachment_list=None):
-        send_mail_attachment_async.delay(
-            self.subject, self.message, [self.user.email], attachment_list
-        )
+    @classmethod
+    def gen_test_msg(cls):
+        from users.models import User
+        from assets.models import Asset
+        user = User.objects.first()
+        assets = Asset.objects.all()[:10]
+        return cls(user, assets)

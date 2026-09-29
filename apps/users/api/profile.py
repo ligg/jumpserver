@@ -1,26 +1,22 @@
 # ~*~ coding: utf-8 ~*~
-import uuid
-
 from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
-from common.permissions import IsValidUserOrConnectionToken
+
+from authentication.models import ConnectionToken
+from authentication.permissions import IsValidUserOrConnectionToken
 from common.utils import get_object_or_none
 from orgs.utils import tmp_to_root_org
-from authentication.models import ConnectionToken
-
 from users.notifications import (
     ResetPasswordMsg, ResetPasswordSuccessMsg, ResetSSHKeyMsg,
-    ResetPublicKeySuccessMsg,
 )
-
+from .mixins import UserQuerysetMixin
 from .. import serializers
 from ..models import User
-from .mixins import UserQuerysetMixin
 
 __all__ = [
     'UserResetPasswordApi', 'UserResetPKApi',
     'UserProfileApi', 'UserPasswordApi',
-    'UserSecretKeyApi', 'UserPublicKeyApi'
+    'UserPermissionsApi'
 ]
 
 
@@ -29,11 +25,7 @@ class UserResetPasswordApi(UserQuerysetMixin, generics.UpdateAPIView):
     serializer_class = serializers.UserSerializer
 
     def perform_update(self, serializer):
-        # Note: we are not updating the user object here.
-        # We just do the reset-password stuff.
         user = self.get_object()
-        user.password_raw = str(uuid.uuid4())
-        user.save()
         ResetPasswordMsg(user).publish_async()
 
 
@@ -72,6 +64,8 @@ class UserProfileApi(generics.RetrieveUpdateAPIView):
 class UserPasswordApi(generics.RetrieveUpdateAPIView):
     permission_classes = (IsAuthenticated,)
     serializer_class = serializers.UserUpdatePasswordSerializer
+    # patch 方法不允许，否则 old_password 不传会导致用户直接修改密码成功，安全风险大
+    http_method_names = ['put', 'head', 'options']
 
     def get_object(self):
         return self.request.user
@@ -82,21 +76,9 @@ class UserPasswordApi(generics.RetrieveUpdateAPIView):
         return resp
 
 
-class UserSecretKeyApi(generics.RetrieveUpdateAPIView):
+class UserPermissionsApi(generics.RetrieveAPIView):
     permission_classes = (IsAuthenticated,)
-    serializer_class = serializers.UserUpdateSecretKeySerializer
+    serializer_class = serializers.UserPermsSerializer
 
     def get_object(self):
         return self.request.user
-
-
-class UserPublicKeyApi(generics.RetrieveUpdateAPIView):
-    permission_classes = (IsAuthenticated,)
-    serializer_class = serializers.UserUpdatePublicKeySerializer
-
-    def get_object(self):
-        return self.request.user
-
-    def perform_update(self, serializer):
-        super().perform_update(serializer)
-        ResetPublicKeySuccessMsg(self.get_object(), self.request).publish_async()

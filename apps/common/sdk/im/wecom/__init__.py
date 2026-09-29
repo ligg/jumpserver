@@ -1,11 +1,15 @@
 from typing import Iterable, AnyStr
+from urllib.parse import urlencode
 
-from django.utils.translation import ugettext_lazy as _
+from django.conf import settings
+from django.core.cache import cache
+from django.utils.translation import gettext_lazy as _
 from rest_framework.exceptions import APIException
 
-from common.utils.common import get_logger
-from common.sdk.im.utils import digest, DictWrapper, update_values, set_default
 from common.sdk.im.mixin import RequestMixin, BaseRequest
+from common.sdk.im.utils import digest
+from common.utils import reverse, random_string, get_logger, lazyproperty
+from users.utils import construct_user_email, flatten_dict, map_attributes
 
 logger = get_logger(__name__)
 
@@ -18,7 +22,7 @@ class WeComError(APIException):
 class URL:
     GET_TOKEN = 'https://qyapi.weixin.qq.com/cgi-bin/gettoken'
     SEND_MESSAGE = 'https://qyapi.weixin.qq.com/cgi-bin/message/send'
-    QR_CONNECT = 'https://open.work.weixin.qq.com/wwopen/sso/qrConnect'
+    QR_CONNECT = 'https://login.work.weixin.qq.com/wwlogin/sso/login'
     OAUTH_CONNECT = 'https://open.weixin.qq.com/connect/oauth2/authorize'
 
     # https://open.work.weixin.qq.com/api/doc/90000/90135/91437
@@ -91,6 +95,10 @@ class WeCom(RequestMixin):
             timeout=timeout
         )
 
+    @property
+    def attributes(self):
+        return settings.WECOM_RENAME_ATTRIBUTES
+
     def send_markdown(self, users: Iterable, msg: AnyStr, **kwargs):
         pass
 
@@ -101,23 +109,14 @@ class WeCom(RequestMixin):
         对于业务代码，只需要关心由 用户id 或 消息不对 导致的错误，其他错误不予理会
         """
         users = tuple(users)
-
-        extra_params = {
-            "safe": 0,
-            "enable_id_trans": 0,
-            "enable_duplicate_check": 0,
-            "duplicate_check_interval": 1800
-        }
-        update_values(extra_params, kwargs)
-
         body = {
-           "touser": '|'.join(users),
-           "msgtype": "text",
-           "agentid": self._agentid,
-           "text": {
-               "content": msg
-           },
-           **extra_params
+            "touser": '|'.join(users),
+            "msgtype": "text",
+            "agentid": self._agentid,
+            "text": {
+                "content": msg
+            },
+            **kwargs
         }
         if markdown:
             body['msgtype'] = 'markdown'
@@ -138,49 +137,89 @@ class WeCom(RequestMixin):
         if 'invaliduser' not in data:
             return ()
 
-        invaliduser = data['invaliduser']
-        if not invaliduser:
+        invalid_user = data['invaliduser']
+        if not invalid_user:
             return ()
 
-        if isinstance(invaliduser, str):
-            logger.error(f'WeCom send text 200, but invaliduser is not str: invaliduser={invaliduser}')
+        if isinstance(invalid_user, str):
+            logger.error(f'WeCom send text 200, but invaliduser is not str: invaliduser={invalid_user}')
             raise WeComError
 
-        invalid_users = invaliduser.split('|')
+        invalid_users = invalid_user.split('|')
         return invalid_users
 
     def get_user_id_by_code(self, code):
         # # https://open.work.weixin.qq.com/api/doc/90000/90135/91437
-
-        params = {
-            'code': code,
-        }
+        params = {'code': code}
         data = self._requests.get(URL.GET_USER_ID_BY_CODE, params=params, check_errcode_is_0=False)
 
         errcode = data['errcode']
         if errcode == ErrorCode.INVALID_CODE:
-            logger.warn(f'WeCom get_user_id_by_code invalid code: code={code}')
+            logger.warning(f'WeCom get_user_id_by_code invalid code: code={code}')
             return None, None
 
         self._requests.check_errcode_is_0(data)
 
-        USER_ID = 'UserId'
-        OPEN_ID = 'OpenId'
-
-        if USER_ID in data:
-            return data[USER_ID], USER_ID
-        elif OPEN_ID in data:
-            return data[OPEN_ID], OPEN_ID
+        user_id = 'UserId'
+        open_id = 'OpenId'
+        if user_id in data:
+            return data[user_id], user_id
+        elif open_id in data:
+            return data[open_id], open_id
         else:
             logger.error(f'WeCom response 200 but get field from json error: fields=UserId|OpenId')
             raise WeComError
 
-    def get_user_detail(self, id):
-        # https://open.work.weixin.qq.com/api/doc/90000/90135/90196
-
-        params = {
-            'userid': id,
+    @staticmethod
+    def default_user_detail(data, user_id):
+        username = data.get('userid', user_id)
+        name = data.get('name', username)
+        email = data.get('email') or data.get('biz_mail')
+        email = construct_user_email(username, email)
+        return {
+            'username': username, 'name': name, 'email': email
         }
 
-        data = self._requests.get(URL.GET_USER_DETAIL, params)
-        return data
+    def get_user_detail(self, user_id, **kwargs):
+        # https://open.work.weixin.qq.com/api/doc/90000/90135/90196
+        data = self._requests.get(URL.GET_USER_DETAIL, {'userid': user_id})
+        info = flatten_dict(data)
+        default_detail = self.default_user_detail(data, user_id)
+        detail = map_attributes(default_detail, info, self.attributes)
+        return detail
+
+
+class WeComTool(object):
+    WECOM_STATE_SESSION_KEY = '_wecom_state'
+    WECOM_STATE_VALUE = 'wecom'
+    WECOM_STATE_NEXT_URL_KEY = 'wecom_oauth_next_url'
+
+    @lazyproperty
+    def qr_cb_url(self):
+        return reverse('authentication:wecom-qr-login-callback', external=True)
+
+    def gen_state(self, request=None):
+        state = random_string(16)
+        if not request:
+            cache.set(state, self.WECOM_STATE_VALUE, timeout=60 * 60 * 24)
+        else:
+            request.session[self.WECOM_STATE_SESSION_KEY] = state
+        return state
+
+    def check_state(self, state, request=None):
+        return cache.get(state) == self.WECOM_STATE_VALUE or \
+            request.session.get(self.WECOM_STATE_SESSION_KEY) == state or \
+            request.GET.get('state') == state  # 在企业微信桌面端打开的话，重新创建了个 session，会导致 session 校验失败
+
+    def wrap_redirect_url(self, next_url):
+        params = {
+            'appid': settings.WECOM_CORPID,
+            'agentid': settings.WECOM_AGENTID,
+            'state': self.gen_state(),
+            'redirect_uri': f'{self.qr_cb_url}?next={next_url}',
+            'response_type': 'code', 'scope': 'snsapi_base',
+        }
+        return URL.OAUTH_CONNECT + '?' + urlencode(params) + '#wechat_redirect'
+
+
+wecom_tool = WeComTool()

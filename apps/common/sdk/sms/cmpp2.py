@@ -4,15 +4,13 @@ import struct
 import time
 
 from django.conf import settings
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
-from common.utils import get_logger
 from common.exceptions import JMSException
+from common.utils import get_logger
 from .base import BaseSMSClient
 
-
 logger = get_logger(__file__)
-
 
 CMPP_CONNECT = 0x00000001  # 请求连接
 CMPP_CONNECT_RESP = 0x80000001  # 请求连接应答
@@ -77,7 +75,7 @@ class CMPPSubmitRequestInstance(CMPPBaseRequestInstance):
         pk_number = struct.pack('!B', 1)
         registered_delivery = struct.pack('!B', 0)
         msg_level = struct.pack('!B', 0)
-        service_id = ((10 - len(service_id)) * '\x00' + service_id).encode('utf-8')
+        service_id = service_id.ljust(10, '\x00').encode('utf-8')
         fee_user_type = struct.pack('!B', 2)
         fee_terminal_id = ('0' * 21).encode('utf-8')
         tp_pid = struct.pack('!B', 0)
@@ -87,7 +85,7 @@ class CMPPSubmitRequestInstance(CMPPBaseRequestInstance):
         fee_code = '000000'.encode('utf-8')
         valid_time = ('\x00' * 17).encode('utf-8')
         at_time = ('\x00' * 17).encode('utf-8')
-        src_id = ((21 - len(src_id)) * '\x00' + src_id).encode('utf-8')
+        src_id = src_id.ljust(21, '\x00').encode('utf-8')
         reserve = b'\x00' * 8
         _msg_length = struct.pack('!B', len(msg_content) * 2)
         _msg_src = msg_src.encode('utf-8')
@@ -99,10 +97,10 @@ class CMPPSubmitRequestInstance(CMPPBaseRequestInstance):
         self.length = 126 + 21 * dest_usr_tl + len(_msg_content)
         self.command_id = CMPP_SUBMIT
         self.body = msg_id + pk_total + pk_number + registered_delivery \
-            + msg_level + service_id + fee_user_type + fee_terminal_id \
-            + tp_pid + tp_udhi + msg_fmt + _msg_src + fee_type + fee_code \
-            + valid_time + at_time + src_id + _dest_usr_tl + _dest_terminal_id \
-            + _msg_length + _msg_content + reserve
+                    + msg_level + service_id + fee_user_type + fee_terminal_id \
+                    + tp_pid + tp_udhi + msg_fmt + _msg_src + fee_type + fee_code \
+                    + valid_time + at_time + src_id + _dest_usr_tl + _dest_terminal_id \
+                    + _msg_length + _msg_content + reserve
 
 
 class CMPPTerminateRequestInstance(CMPPBaseRequestInstance):
@@ -161,7 +159,7 @@ class CMPPResponseInstance(object):
         src_terminal_id = body[42:63]
         registered_delivery = struct.unpack('!B', body[63:64])
         msg_length = struct.unpack('!B', body[64:65])
-        msg_content = body[65:msg_length[0]+65]
+        msg_content = body[65:msg_length[0] + 65]
         return {
             'Msg_Id': msg_id, 'Dest_Id': dest_id, 'Service_Id': service_id,
             'TP_pid': tp_pid, 'TP_udhi': tp_udhi, 'Msg_Fmt': msg_fmt,

@@ -1,95 +1,72 @@
-FROM python:3.8-slim
-MAINTAINER JumpServer Team <ibuler@qq.com>
-
-ARG BUILD_DEPENDENCIES="              \
-    g++                               \
-    make                              \
-    pkg-config"
-
-ARG DEPENDENCIES="                    \
-    default-libmysqlclient-dev        \
-    freetds-dev                       \
-    libpq-dev                         \
-    libffi-dev                        \
-    libldap2-dev                      \
-    libsasl2-dev                      \
-    libxml2-dev                       \
-    libxmlsec1-dev                    \
-    libxmlsec1-openssl                \
-    libaio-dev                        \
-    openssh-client                    \
-    sshpass"
-
-ARG TOOLS="                           \
-    curl                              \
-    default-mysql-client              \
-    iproute2                          \
-    iputils-ping                      \
-    locales                           \
-    procps                            \
-    redis-tools                       \
-    telnet                            \
-    vim                               \
-    unzip                             \
-    wget"
-
-RUN sed -i 's@http://.*.debian.org@http://mirrors.ustc.edu.cn@g' /etc/apt/sources.list \
-    && apt-get update \
-    && apt-get -y install --no-install-recommends ${BUILD_DEPENDENCIES} \
-    && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
-    && apt-get -y install --no-install-recommends ${TOOLS} \
-    && localedef -c -f UTF-8 -i zh_CN zh_CN.UTF-8 \
-    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && mkdir -p /root/.ssh/ \
-    && echo "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile /dev/null" > /root/.ssh/config \
-    && sed -i "s@# alias l@alias l@g" ~/.bashrc \
-    && echo "set mouse-=a" > ~/.vimrc \
-    && echo "no" | dpkg-reconfigure dash \
-    && rm -rf /var/lib/apt/lists/*
-
-ARG TARGETARCH
-ARG ORACLE_LIB_MAJOR=19
-ARG ORACLE_LIB_MINOR=10
-ENV ORACLE_FILE="instantclient-basiclite-linux.${TARGETARCH:-amd64}-${ORACLE_LIB_MAJOR}.${ORACLE_LIB_MINOR}.0.0.0dbru.zip"
-
-RUN mkdir -p /opt/oracle/ \
-    && cd /opt/oracle/ \
-    && wget https://download.jumpserver.org/files/oracle/${ORACLE_FILE} \
-    && unzip instantclient-basiclite-linux.${TARGETARCH-amd64}-19.10.0.0.0dbru.zip \
-    && mv instantclient_${ORACLE_LIB_MAJOR}_${ORACLE_LIB_MINOR} instantclient \
-    && echo "/opt/oracle/instantclient" > /etc/ld.so.conf.d/oracle-instantclient.conf \
-    && ldconfig \
-    && rm -f ${ORACLE_FILE}
-
-WORKDIR /tmp/build
-COPY ./requirements ./requirements
-
-ARG PIP_MIRROR=https://pypi.douban.com/simple
-ENV PIP_MIRROR=$PIP_MIRROR
-ARG PIP_JMS_MIRROR=https://pypi.douban.com/simple
-ENV PIP_JMS_MIRROR=$PIP_JMS_MIRROR
-# 因为以 jms 或者 jumpserver 开头的 mirror 上可能没有
-RUN pip install --upgrade pip==20.2.4 setuptools==49.6.0 wheel==0.34.2 -i ${PIP_MIRROR} \
-    && pip install --no-cache-dir $(grep -E 'jms|jumpserver' requirements/requirements.txt) -i ${PIP_JMS_MIRROR} \
-    && pip install --no-cache-dir -r requirements/requirements.txt -i ${PIP_MIRROR} \
-    && rm -rf ~/.cache/pip
+FROM jumpserver/core-base:20260908_003939 AS stage-build
 
 ARG VERSION
-ENV VERSION=$VERSION
-
-ADD . .
-RUN cd utils \
-    && bash -ixeu build.sh \
-    && mv ../release/jumpserver /opt/jumpserver \
-    && rm -rf /tmp/build \
-    && echo > /opt/jumpserver/config.yml
 
 WORKDIR /opt/jumpserver
+
+ADD . .
+
+RUN echo > /opt/jumpserver/config.yml \
+    && \
+    if [ -n "${VERSION}" ]; then \
+        sed -i "s@VERSION = .*@VERSION = '${VERSION}'@g" apps/jumpserver/const.py; \
+    fi
+RUN set -ex \
+    && export SECRET_KEY=$(head -c100 < /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 48) \
+    && . /opt/py3/bin/activate \
+    && uv pip install -r pyproject.toml \
+    && rm -rf /root/.cache/ \
+    && cd apps \
+    && python manage.py compilemessages
+
+
+FROM python:3.14-slim-trixie
+ENV LANG=en_US.UTF-8 \
+    PATH=/opt/py3/bin:$PATH
+
+ARG DEPENDENCIES="                    \
+        libldap2-dev                  \
+        libx11-dev"
+
+ARG TOOLS="                           \
+        cron                          \
+        ca-certificates               \
+        default-libmysqlclient-dev    \
+        libmariadb3                   \
+        postgresql-client             \
+        openssh-client                \
+        sshpass                       \
+        bubblewrap                    \
+        docker-cli"
+
+ARG APT_MIRROR=http://deb.debian.org
+
+RUN set -ex \
+    && sed -i "s@http://.*.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list.d/debian.sources \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && apt-get update > /dev/null \
+    && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
+    && apt-get -y install --no-install-recommends ${TOOLS} \
+    && mkdir -p /root/.ssh/ \
+    && echo "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile /dev/null\n\tCiphers +aes128-cbc\n\tKexAlgorithms +diffie-hellman-group1-sha1\n\tHostKeyAlgorithms +ssh-rsa" > /root/.ssh/config \
+    && echo "no" | dpkg-reconfigure dash \
+    && apt-get clean all \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "0 3 * * * root find /tmp -type f -mtime +1 -size +1M -exec rm -f {} \; && date > /tmp/clean.log" > /etc/cron.d/cleanup_tmp \
+    && chmod 0644 /etc/cron.d/cleanup_tmp
+
+COPY --from=stage-build /opt /opt
+COPY --from=stage-build /usr/local/bin /usr/local/bin
+COPY --from=stage-build /opt/jumpserver/apps/libs/ansible/ansible.cfg /etc/ansible/
+
+WORKDIR /opt/jumpserver
+
 VOLUME /opt/jumpserver/data
-VOLUME /opt/jumpserver/logs
 
-ENV LANG=zh_CN.UTF-8
-
-EXPOSE 8070
-EXPOSE 8080
 ENTRYPOINT ["./entrypoint.sh"]
+
+EXPOSE 8080 8088
+
+STOPSIGNAL SIGQUIT
+
+CMD ["start", "all"]

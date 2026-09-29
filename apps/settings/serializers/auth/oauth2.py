@@ -1,9 +1,9 @@
-
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
-from common.drf.fields import EncryptedField
+from common.serializers.fields import EncryptedField
 from common.utils import static_or_direct
+from .base import OrgListField
 
 __all__ = [
     'OAuth2SettingSerializer',
@@ -16,8 +16,10 @@ class SettingImageField(serializers.ImageField):
 
 
 class OAuth2SettingSerializer(serializers.Serializer):
+    PREFIX_TITLE = _('OAuth2')
+
     AUTH_OAUTH2 = serializers.BooleanField(
-        default=False, label=_('Enable OAuth2 Auth')
+        default=False, label=_('OAuth2')
     )
     AUTH_OAUTH2_LOGO_PATH = SettingImageField(
         allow_null=True, required=False, label=_('Logo')
@@ -26,7 +28,7 @@ class OAuth2SettingSerializer(serializers.Serializer):
         required=True, max_length=16, label=_('Service provider')
     )
     AUTH_OAUTH2_CLIENT_ID = serializers.CharField(
-        required=True, max_length=1024, label=_('Client Id')
+        required=True, max_length=1024, label=_('Client ID')
     )
     AUTH_OAUTH2_CLIENT_SECRET = EncryptedField(
         required=False, max_length=1024, label=_('Client Secret')
@@ -35,25 +37,33 @@ class OAuth2SettingSerializer(serializers.Serializer):
         required=True, max_length=1024, label=_('Scope'), allow_blank=True
     )
     AUTH_OAUTH2_PROVIDER_AUTHORIZATION_ENDPOINT = serializers.CharField(
-        required=True, max_length=1024, label=_('Provider auth endpoint')
+        required=True, max_length=1024, label=_('Authorization endpoint')
     )
     AUTH_OAUTH2_ACCESS_TOKEN_ENDPOINT = serializers.CharField(
-        required=True, max_length=1024, label=_('Provider token endpoint')
+        required=True, max_length=1024, label=_('Token endpoint')
     )
     AUTH_OAUTH2_ACCESS_TOKEN_METHOD = serializers.ChoiceField(
-        default='GET', label=_('Client authentication method'),
-        choices=(('GET', 'GET'), ('POST', 'POST'))
+        default='GET', label=_('Request method'),
+        choices=(('GET', 'GET'), ('POST', 'POST-DATA'), ('POST_JSON', 'POST-JSON'))
     )
     AUTH_OAUTH2_PROVIDER_USERINFO_ENDPOINT = serializers.CharField(
-        required=True, max_length=1024, label=_('Provider userinfo endpoint')
+        required=True, max_length=1024, label=_('Userinfo endpoint')
     )
     AUTH_OAUTH2_PROVIDER_END_SESSION_ENDPOINT = serializers.CharField(
-        required=False, max_length=1024, label=_('Provider end session endpoint')
+        required=False, allow_blank=True, max_length=1024, label=_('End session endpoint')
     )
-    AUTH_OAUTH2_LOGOUT_COMPLETELY = serializers.BooleanField(required=False, label=_('Logout completely'))
-    AUTH_OAUTH2_USER_ATTR_MAP = serializers.DictField(
-        required=True, label=_('User attr map')
+    AUTH_OAUTH2_LOGOUT_COMPLETELY = serializers.BooleanField(
+        required=False, label=_('Logout completely'),
+        help_text=_('When the user signs out, they also be logged out from the OAuth2 server')
+    )
+    AUTH_OAUTH2_USER_ATTR_MAP = serializers.JSONField(
+        required=True, label=_('User attribute'),
+        help_text=_(
+            'User attribute mapping, where the `key` is this system user attribute name and the '
+            '`value` is the OAuth2 service user attribute name'
+        )
     )
     AUTH_OAUTH2_ALWAYS_UPDATE_USER = serializers.BooleanField(
         default=True, label=_('Always update user')
     )
+    OAUTH2_ORG_IDS = OrgListField()

@@ -1,18 +1,17 @@
 import importlib
-
 from collections import OrderedDict
 
+from django.utils.translation import gettext_lazy as _
+from django.conf import settings
+from rest_framework import status
+from rest_framework.exceptions import APIException
 from rest_framework.generics import ListAPIView, GenericAPIView
 from rest_framework.response import Response
-from rest_framework.exceptions import APIException
-from rest_framework import status
-from django.utils.translation import gettext_lazy as _
 
-from common.sdk.sms import BACKENDS
 from common.exceptions import JMSException
-from settings.serializers.sms import SMSBackendSerializer
+from common.sdk.sms import BACKENDS
 from settings.models import Setting
-
+from settings.serializers import SMSBackendSerializer
 from .. import serializers
 
 
@@ -30,7 +29,6 @@ class SMSBackendAPI(ListAPIView):
             }
             for b in BACKENDS.choices
         ]
-
         return Response(data)
 
 
@@ -39,11 +37,17 @@ class SMSTestingAPI(GenericAPIView):
         'alibaba': serializers.AlibabaSMSSettingSerializer,
         'tencent': serializers.TencentSMSSettingSerializer,
         'huawei': serializers.HuaweiSMSSettingSerializer,
-        'cmpp2': serializers.CMPP2SMSSettingSerializer
+        'cmpp2': serializers.CMPP2SMSSettingSerializer,
+        'custom': serializers.CustomSMSSettingSerializer,
+        'custom_file': serializers.BaseSMSSettingSerializer,
     }
     rbac_perms = {
         'POST': 'settings.change_sms'
     }
+
+    @property
+    def test_code(self):
+        return '6' * settings.SMS_CODE_LENGTH
 
     @staticmethod
     def get_or_from_setting(key, value=''):
@@ -64,7 +68,7 @@ class SMSTestingAPI(GenericAPIView):
         send_sms_params = {
             'sign_name': data['ALIBABA_VERIFY_SIGN_NAME'],
             'template_code': data['ALIBABA_VERIFY_TEMPLATE_CODE'],
-            'template_param': {'code': '666666'}
+            'template_param': {'code': self.test_code}
         }
         return init_params, send_sms_params
 
@@ -79,7 +83,7 @@ class SMSTestingAPI(GenericAPIView):
         send_sms_params = {
             'sign_name': data['TENCENT_VERIFY_SIGN_NAME'],
             'template_code': data['TENCENT_VERIFY_TEMPLATE_CODE'],
-            'template_param': OrderedDict(code='666666')
+            'template_param': OrderedDict(code=self.test_code)
         }
         return init_params, send_sms_params
 
@@ -95,7 +99,7 @@ class SMSTestingAPI(GenericAPIView):
         send_sms_params = {
             'sign_name': data['HUAWEI_VERIFY_SIGN_NAME'],
             'template_code': data['HUAWEI_VERIFY_TEMPLATE_CODE'],
-            'template_param': OrderedDict(code='666666')
+            'template_param': OrderedDict(code=self.test_code)
         }
         return init_params, send_sms_params
 
@@ -111,9 +115,17 @@ class SMSTestingAPI(GenericAPIView):
         send_sms_params = {
             'sign_name': data['CMPP2_VERIFY_SIGN_NAME'],
             'template_code': data['CMPP2_VERIFY_TEMPLATE_CODE'],
-            'template_param': OrderedDict(code='666666')
+            'template_param': OrderedDict(code=self.test_code)
         }
         return init_params, send_sms_params
+
+    def get_custom_params(self, data):
+        init_params = {}
+        send_sms_params = {'template_param': OrderedDict(code=self.test_code)}
+        return init_params, send_sms_params
+
+    def get_custom_file_params(self, data):
+        return self.get_custom_params(data)
 
     def get_params_by_backend(self, backend, data):
         """

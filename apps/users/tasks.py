@@ -1,26 +1,34 @@
 # -*- coding: utf-8 -*-
 #
+import uuid
+from datetime import timedelta
 
-from celery import shared_task
+from celery import shared_task, current_task
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _, gettext_noop
 
-from users.notifications import PasswordExpirationReminderMsg
-from ops.celery.utils import (
-    create_or_update_celery_periodic_tasks, disable_celery_periodic_task
-)
-from ops.celery.decorator import after_app_ready_start
+from audits.const import ActivityChoices
+from common.const.crontab import CRONTAB_AT_AM_TEN, CRONTAB_AT_PM_TWO
 from common.utils import get_logger
-from orgs.models import Organization
-from .models import User
+from ops.celery.decorator import after_app_ready_start, register_as_period_task
+from ops.celery.utils import create_or_update_celery_periodic_tasks
+from orgs.utils import tmp_to_root_org
+from users.notifications import PasswordExpirationReminderMsg
 from users.notifications import UserExpirationReminderMsg
-from settings.utils import LDAPServerUtil, LDAPImportUtil
-
+from .models import User
 
 logger = get_logger(__file__)
 
 
-@shared_task
+@shared_task(
+    verbose_name=_('Check password expired'),
+    description=_(
+        """Check every day at 10 AM whether the passwords of users in the system are expired, 
+        and send a notification 5 days in advance"""
+    )
+)
 def check_password_expired():
     users = User.get_nature_users().filter(source=User.Source.local)
     for user in users:
@@ -34,97 +42,126 @@ def check_password_expired():
         PasswordExpirationReminderMsg(user).publish_async()
 
 
-@shared_task
+@shared_task(
+    verbose_name=_('Periodic check password expired'),
+    description=_(
+        """With version iterations, new tasks may be added, or task names and execution times may 
+        be modified. Therefore, upon system startup, it is necessary to register or update the 
+        parameters of the task that checks if passwords have expired"""
+    )
+)
 @after_app_ready_start
 def check_password_expired_periodic():
     tasks = {
         'check_password_expired_periodic': {
             'task': check_password_expired.name,
             'interval': None,
-            'crontab': '0 10 * * *',
+            'crontab': CRONTAB_AT_AM_TEN,
             'enabled': True,
         }
     }
     create_or_update_celery_periodic_tasks(tasks)
 
 
-@shared_task
+@shared_task(
+    verbose_name=_('Check user expired'),
+    description=_(
+        """Check every day at 2 p.m whether the users in the system are expired, and send a 
+        notification in advance"""
+    )
+)
 def check_user_expired():
-    date_expired_lt = timezone.now() + timezone.timedelta(days=User.DATE_EXPIRED_WARNING_DAYS)
-    users = User.get_nature_users()\
-        .filter(source=User.Source.local)\
+    first_notice_days = settings.USER_EXPIRED_FIRST_NOTICE_DAYS
+    daily_notice_days = settings.USER_EXPIRED_DAILY_NOTICE_DAYS
+    today = timezone.localdate()
+    date_expired_lt = timezone.now() + timezone.timedelta(days=first_notice_days + 1)
+    users = User.get_nature_users() \
+        .filter(source=User.Source.local) \
         .filter(date_expired__lt=date_expired_lt)
 
     for user in users:
         if not user.is_valid:
             continue
-        if not user.will_expired:
+        date_expired = timezone.localtime(user.date_expired).date()
+        remain_days = (date_expired - today).days
+        should_notify = (
+            remain_days == first_notice_days
+            or 0 <= remain_days <= daily_notice_days
+        )
+        if not should_notify:
             continue
         msg = "The user {} will expires in {} days"
-        logger.info(msg.format(user, user.expired_remain_days))
+        logger.info(msg.format(user, remain_days))
         UserExpirationReminderMsg(user).publish_async()
 
 
-@shared_task
+@shared_task(
+    verbose_name=_('Periodic check user expired'),
+    description=_(
+        """With version iterations, new tasks may be added, or task names and execution times may 
+        be modified. Therefore, upon system startup, it is necessary to register or update the 
+        parameters of the task that checks if users have expired"""
+    )
+)
 @after_app_ready_start
 def check_user_expired_periodic():
     tasks = {
         'check_user_expired_periodic': {
             'task': check_user_expired.name,
             'interval': None,
-            'crontab': '0 14 * * *',
+            'crontab': CRONTAB_AT_PM_TWO,
             'enabled': True,
         }
     }
     create_or_update_celery_periodic_tasks(tasks)
 
 
-@shared_task
-def import_ldap_user():
-    logger.info("Start import ldap user task")
-    util_server = LDAPServerUtil()
-    util_import = LDAPImportUtil()
-    users = util_server.search()
-    if settings.XPACK_ENABLED:
-        org_id = settings.AUTH_LDAP_SYNC_ORG_ID
-        default_org = None
-    else:
-        # 社区版默认导入Default组织
-        org_id = Organization.DEFAULT_ID
-        default_org = Organization.default()
-    org = Organization.get_instance(org_id, default=default_org)
-    errors = util_import.perform_import(users, org)
-    if errors:
-        logger.error("Imported LDAP users errors: {}".format(errors))
-    else:
-        logger.info('Imported {} users successfully'.format(len(users)))
-
-
-@shared_task
-@after_app_ready_start
-def import_ldap_user_periodic():
-    if not settings.AUTH_LDAP:
-        return
-    task_name = 'import_ldap_user_periodic'
-    if not settings.AUTH_LDAP_SYNC_IS_PERIODIC:
-        disable_celery_periodic_task(task_name)
+@shared_task(
+    verbose_name=_('Check unused users'),
+    description=_(
+        """At 2 p.m. every day, according to the configuration in "System Settings - Security - 
+        Auth security - Auto disable threshold" users who have not logged in or whose API keys 
+        have not been used for a long time will be disabled"""
+    )
+)
+@register_as_period_task(crontab=CRONTAB_AT_PM_TWO)
+@tmp_to_root_org()
+def check_unused_users():
+    uncommon_users_ttl = settings.SECURITY_UNCOMMON_USERS_TTL
+    if not uncommon_users_ttl:
         return
 
-    interval = settings.AUTH_LDAP_SYNC_INTERVAL
-    if isinstance(interval, int):
-        interval = interval * 3600
+    uncommon_users_ttl = int(uncommon_users_ttl)
+    if uncommon_users_ttl <= 0 or uncommon_users_ttl >= 999:
+        return
+
+    seconds_to_subtract = uncommon_users_ttl * 24 * 60 * 60
+    t = timezone.now() - timedelta(seconds=seconds_to_subtract)
+    last_login_q = Q(last_login__lte=t) | (Q(last_login__isnull=True) & Q(date_joined__lte=t))
+    api_key_q = Q(date_api_key_last_used__lte=t) | (
+            Q(date_api_key_last_used__isnull=True) & Q(date_joined__lte=t))
+
+    users = User.objects \
+        .filter(date_joined__lt=t) \
+        .filter(is_active=True) \
+        .filter(last_login_q) \
+        .filter(api_key_q) \
+        .exclude(username='admin')
+
+    if not users:
+        return
+
+    print("Some users are not used for a long time, and they will be disabled.")
+    resource_ids = []
+    for user in users:
+        resource_ids.append(user.id)
+        print('  - {}'.format(user.name))
+
+    users.update(is_active=False)
+    from audits.signal_handlers import create_activities
+    if current_task:
+        task_id = current_task.request.id
     else:
-        interval = None
-    crontab = settings.AUTH_LDAP_SYNC_CRONTAB
-    if crontab:
-        # 优先使用 crontab
-        interval = None
-    tasks = {
-        task_name: {
-            'task': import_ldap_user.name,
-            'interval': interval,
-            'crontab': crontab,
-            'enabled': True,
-        }
-    }
-    create_or_update_celery_periodic_tasks(tasks)
+        task_id = str(uuid.uuid4())
+    detail = gettext_noop('The user has not logged in recently and has been disabled.')
+    create_activities(resource_ids, detail, task_id, action=ActivityChoices.task, org_id='')

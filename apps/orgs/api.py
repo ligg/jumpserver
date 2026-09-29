@@ -1,47 +1,42 @@
 # -*- coding: utf-8 -*-
 #
 
-from django.utils.translation import ugettext as _
 from django.conf import settings
-from rest_framework_bulk import BulkModelViewSet
-from rest_framework.generics import RetrieveAPIView
+from django.utils.translation import gettext as _
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.generics import RetrieveAPIView
 
-from common.permissions import IsValidUser
+from accounts.models import AccountTemplate
+from assets.models import (
+    Asset, Zone, Node,
+)
+from common.api import JMSBulkModelViewSet
+from common.permissions import IsValidUser, IsValidLicenseForWriteAction
+from common.utils import get_logger
+from labels.models import Label
+from orgs.utils import current_org, tmp_to_root_org
+from perms.models import AssetPermission
+from rbac.permissions import RBACPermission
+from users.models import User, UserGroup
 from .models import Organization
 from .serializers import (
     OrgSerializer, CurrentOrgSerializer
 )
-from users.models import User, UserGroup
-from assets.models import (
-    Asset, Domain, SystemUser, Label, Node, Gateway,
-    CommandFilter, CommandFilterRule, GatheredUser
-)
-from applications.models import Application
-from perms.models import AssetPermission, ApplicationPermission
-from orgs.utils import current_org, tmp_to_root_org
-from common.utils import get_logger
-
 
 logger = get_logger(__file__)
 
-
 # 部分 org 相关的 model，需要清空这些数据之后才能删除该组织
 org_related_models = [
-    User, UserGroup, Asset, Label, Domain, Gateway, Node, SystemUser, Label,
-    CommandFilter, CommandFilterRule, GatheredUser,
-    AssetPermission, ApplicationPermission,
-    Application,
+    User, UserGroup, Asset, Node, Label, Zone, AssetPermission, AccountTemplate
 ]
 
 
-class OrgViewSet(BulkModelViewSet):
+class OrgViewSet(JMSBulkModelViewSet):
     filterset_fields = ('name',)
     search_fields = ('name', 'comment')
     queryset = Organization.objects.all()
     serializer_class = OrgSerializer
-    ordering_fields = ('name',)
-    ordering = ('name', )
+    permission_classes = [RBACPermission, IsValidLicenseForWriteAction]
 
     def get_serializer_class(self):
         mapper = {
@@ -69,9 +64,10 @@ class OrgViewSet(BulkModelViewSet):
             msg = _('The current organization ({}) cannot be deleted').format(current_org)
             raise PermissionDenied(detail=msg)
 
-        if str(instance.id) == settings.AUTH_LDAP_SYNC_ORG_ID:
+        if str(instance.id) in settings.AUTH_LDAP_SYNC_ORG_IDS:
             msg = _(
-                'LDAP synchronization is set to the current organization. Please switch to another organization before deleting'
+                'LDAP synchronization is set to the current organization. '
+                'Please switch to another organization before deleting'
             )
             raise PermissionDenied(detail=msg)
 

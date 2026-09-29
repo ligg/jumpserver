@@ -1,0 +1,45 @@
+from collections import OrderedDict
+
+import requests
+from django.conf import settings
+
+from common.exceptions import JMSException
+from common.utils import get_logger
+from .base import BaseSMSClient
+
+logger = get_logger(__file__)
+
+
+class CustomSMS(BaseSMSClient):
+    @classmethod
+    def new_from_settings(cls):
+        return cls()
+
+    @staticmethod
+    def need_pre_check():
+        return False
+
+    def send_sms(self, phone_numbers: list, template_param: OrderedDict, **kwargs):
+        phone_numbers_str = ','.join(phone_numbers)
+        params = {}
+        for k, v in settings.CUSTOM_SMS_API_PARAMS.items():
+            params[k] = v.format(
+                code=template_param.get('code'), phone_numbers=phone_numbers_str
+            )
+
+        logger.info(f'Custom sms send: phone_numbers={phone_numbers}, param={params}')
+        if settings.CUSTOM_SMS_REQUEST_METHOD == 'post':
+            action = requests.post
+            kwargs = {'json': params}
+        else:
+            action = requests.get
+            kwargs = {'params': params}
+        try:
+            response = action(url=settings.CUSTOM_SMS_URL, verify=settings.VERIFY_EXTERNAL_SSL, **kwargs)
+            response.raise_for_status()
+        except Exception as exc:
+            logger.error('Custom sms error: {}'.format(exc))
+            raise JMSException(exc)
+
+
+client = CustomSMS
